@@ -51,8 +51,8 @@ $data
 "@
 
 if (Test-Path $LastResultPath) { Remove-Item $LastResultPath -Force }
-& $CodexExe exec --ephemeral --sandbox read-only --skip-git-repo-check `
-    --output-schema $SchemaPath --output-last-message $LastResultPath $prompt | Out-Null
+$prompt | & $CodexExe exec --ephemeral --sandbox read-only --skip-git-repo-check `
+    --output-schema $SchemaPath --output-last-message $LastResultPath - | Out-Null
 
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $LastResultPath)) {
     throw "Codex radar generation failed."
