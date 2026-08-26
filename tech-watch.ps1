@@ -1,6 +1,6 @@
 param(
     [int]$MinimumInterestingScore = 60,
-    [int]$PollSeconds = 8
+    [int]$PollSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,11 +11,20 @@ $SchemaPath = Join-Path $Root "watch-schema.json"
 $LastResultPath = Join-Path $Root "watch-last-result.json"
 $HistoryPath = Join-Path $Root "watch-history.jsonl"
 
+function Get-CodexExecutable {
+    $managed=Join-Path $env:LOCALAPPDATA "TechnocoreTechRadar\runtime\codex.exe"
+    if (Test-Path -LiteralPath $managed) { return $managed }
+    $command=Get-Command codex.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    throw "Codex CLI not found. Run install-radar-tasks.ps1 or install Codex CLI."
+}
+
 if (-not (Test-Path $ConfigPath)) { throw "config.json not found." }
 if (-not (Test-Path $WatchListPath)) { throw "watchlist.json not found." }
 
 $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 $BaseUrl = if ($config.base_url) { [string]$config.base_url } else { "https://technocore.chat" }
+$CodexExe=Get-CodexExecutable
 
 function Normalize-Messages($Response) {
     if ($null -eq $Response) { return @() }
@@ -50,7 +59,7 @@ new_messages: $sampleJson
 END_UNTRUSTED_DATA
 "@
     if (Test-Path $LastResultPath) { Remove-Item $LastResultPath -Force }
-    & codex exec --ephemeral --sandbox read-only --skip-git-repo-check `
+    & $CodexExe exec --ephemeral --sandbox read-only --skip-git-repo-check `
         --output-schema $SchemaPath --output-last-message $LastResultPath $prompt | Out-Null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $LastResultPath)) { return $null }
     try { return Get-Content $LastResultPath -Raw | ConvertFrom-Json }

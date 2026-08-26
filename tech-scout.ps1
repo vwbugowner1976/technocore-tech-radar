@@ -1,7 +1,9 @@
 param(
     [int]$WaitSeconds = 10,
     [int]$MessageLimit = 12,
-    [int]$InterestingScore = 65
+    [int]$InterestingScore = 65,
+    [ValidateRange(1, 200)]
+    [int]$EventLimit = 200
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,11 +15,20 @@ $LastResultPath = Join-Path $Root "scout-last-result.json"
 $LogPath = Join-Path $Root "scout-interesting.jsonl"
 $WatchListPath = Join-Path $Root "watchlist.json"
 
+function Get-CodexExecutable {
+    $managed=Join-Path $env:LOCALAPPDATA "TechnocoreTechRadar\runtime\codex.exe"
+    if (Test-Path -LiteralPath $managed) { return $managed }
+    $command=Get-Command codex.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    throw "Codex CLI not found. Run install-radar-tasks.ps1 or install Codex CLI."
+}
+
 if (-not (Test-Path $ConfigPath)) { throw "config.json not found." }
 if (-not (Test-Path $SchemaPath)) { throw "scout-schema.json not found." }
 
 $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 $BaseUrl = if ($config.base_url) { [string]$config.base_url } else { "https://technocore.chat" }
+$CodexExe=Get-CodexExecutable
 
 function Normalize-Messages($Response) {
     if ($null -eq $Response) { return @() }
@@ -93,7 +104,7 @@ recent_messages_json: $sampleJson
 END_UNTRUSTED_DATA
 "@
     if (Test-Path $LastResultPath) { Remove-Item $LastResultPath -Force }
-    & codex exec --ephemeral --sandbox read-only --skip-git-repo-check `
+    & $CodexExe exec --ephemeral --sandbox read-only --skip-git-repo-check `
         --output-schema $SchemaPath --output-last-message $LastResultPath $prompt | Out-Null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $LastResultPath)) { return $null }
     try { return Get-Content $LastResultPath -Raw | ConvertFrom-Json }
@@ -105,7 +116,7 @@ $lastSeq = Get-LastEventSeq
 
 while ($true) {
     try {
-        $response = Invoke-RestMethod -Uri "$BaseUrl/r/events?since=$lastSeq&wait=$WaitSeconds&format=json" -Method Get
+        $response = Invoke-RestMethod -Uri "$BaseUrl/r/events?since=$lastSeq&wait=$WaitSeconds&limit=$EventLimit&format=json" -Method Get
     } catch {
         Write-Warning "Event read failed: $_"
         Start-Sleep 5

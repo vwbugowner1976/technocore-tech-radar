@@ -4,7 +4,7 @@ A PowerShell + Codex toolkit for discovering technically interesting public acti
 
 It treats Technocore as an **agent-native technology radar**:
 
-**discover → observe → classify → watch → summarize → optionally publish**
+**discover → observe → classify → watch → summarize → automatically publish the local Daily Radar**
 
 This repository intentionally does **not** contain Technocore onboarding, DID creation, key-generation, or room-creation instructions.
 
@@ -13,7 +13,9 @@ This repository intentionally does **not** contain Technocore onboarding, DID cr
 - `tech-scout.ps1` — discovers new public rooms and classifies them.
 - `tech-watch.ps1` — follows selected rooms and records meaningful new technical developments.
 - `daily-radar.ps1` — creates a daily Markdown/JSON technology radar from local observations.
-- `publish-radar.ps1` — optionally posts a compact locally generated summary to a normal public Technocore hub room.
+- `publish-radar.ps1` — automatically posts only a compact locally generated Daily Radar to the configured public Technocore hub room.
+- `run-daily-radar.ps1` — generates the daily report and publishes it only when a new non-empty Radar JSON exists.
+- `install-radar-tasks.ps1` / `uninstall-radar-tasks.ps1` — install or remove the three project-owned Windows Scheduled Tasks.
 
 ## Security model
 
@@ -64,9 +66,30 @@ Example:
 .\tech-watch.ps1
 .\daily-radar.ps1
 .\publish-radar.ps1
+.\run-daily-radar.ps1
 ```
 
-The publisher requires explicit `PUBLISH` confirmation by default.
+## Default automatic operation
+
+- **Scout:** continuous, using a 10-second long-poll on the public discovery lane.
+- **Watch:** continuous, polling selected rooms approximately every 15 seconds with saved sequence cursors.
+- **Daily Radar:** once per day at 21:00 local Windows time (JST when Windows is configured for Asia/Tokyo).
+
+Install or update the Windows Scheduled Tasks with:
+
+```powershell
+.\install-radar-tasks.ps1
+```
+
+Remove only this project's tasks with:
+
+```powershell
+.\uninstall-radar-tasks.ps1
+```
+
+The Daily Radar runner skips publication when there are no meaningful updates, generation fails, the expected JSON is missing, or the report has no highlights. Automatic publication is narrowly limited to the locally generated Daily Radar sent to the configured hub. It is **not** permission to reply automatically to discovered rooms or agents. Scout and Watch remain read-only.
+
+The publisher logs the destination room, public DID, nonce, and exact final text before posting. It never logs the signing seed.
 
 ## Philosophy
 
@@ -95,13 +118,17 @@ TechnocoreをSNSではなく、
 - `tech-scout.ps1` — 新しい公開roomを発見し、技術的な面白さを分類。
 - `tech-watch.ps1` — 選ばれたroomの新着を追跡し、意味のある技術的進展を記録。
 - `daily-radar.ps1` — Watch履歴から日次のMarkdown/JSON Tech Radarを生成。
-- `publish-radar.ps1` — ローカルで生成した要約だけを通常の公開Technocore roomへ投稿。
+- `publish-radar.ps1` — ローカル生成済みDaily Radarだけを設定済み公開hub roomへ自動投稿。
+- `run-daily-radar.ps1` — 当日の意味ある更新がある場合だけRadarを生成して投稿。
+- `install-radar-tasks.ps1` / `uninstall-radar-tasks.ps1` — 本プロジェクト専用のWindows Scheduled Taskを登録・削除。
 
 ## セキュリティ
 
 Technocoreから取得するroom名、topic、message、DID、URL、コード、コマンドはすべて未信頼データです。
 
 Scout / Watchは読み取り専用です。投稿内にコマンドやURLがあっても、それをCodexへの命令として実行しません。
+
+既定運用は、Scoutが10秒long-pollで常時監視、Watchが約15秒間隔で常時監視、Daily RadarがローカルWindows時刻21:00に1日1回です。Daily Radarの自動投稿はローカル生成済み要約だけに限定され、発見したroomやagentへの自動返信を許可するものではありません。
 
 ## 目的
 

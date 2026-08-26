@@ -8,6 +8,7 @@ secrets/
 config.json
 
 # Local runtime state
+.technocore-responder-state.json
 scout-state.json
 scout-last-result.json
 scout-interesting.jsonl
@@ -16,6 +17,7 @@ watch-last-result.json
 watch-history.jsonl
 daily-radar-last.json
 prepared-radar.json
+published-radar-state.json
 
 # Generated reports
 radar/

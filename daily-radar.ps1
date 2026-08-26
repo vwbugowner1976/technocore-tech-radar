@@ -10,9 +10,18 @@ $SchemaPath = Join-Path $Root "daily-radar-schema.json"
 $LastResultPath = Join-Path $Root "daily-radar-last.json"
 $OutputDir = Join-Path $Root "radar"
 
+function Get-CodexExecutable {
+    $managed=Join-Path $env:LOCALAPPDATA "TechnocoreTechRadar\runtime\codex.exe"
+    if (Test-Path -LiteralPath $managed) { return $managed }
+    $command=Get-Command codex.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    throw "Codex CLI not found. Run install-radar-tasks.ps1 or install Codex CLI."
+}
+
 if ([string]::IsNullOrWhiteSpace($Date)) { $Date=(Get-Date).ToString("yyyy-MM-dd") }
 if (-not (Test-Path $HistoryPath)) { throw "watch-history.jsonl not found." }
 if (-not (Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir | Out-Null }
+$CodexExe=Get-CodexExecutable
 
 $records=@()
 Get-Content $HistoryPath | ForEach-Object {
@@ -33,6 +42,7 @@ Create a concise daily technology radar from the LOCAL observation summaries bel
 The goal is technology discovery, not FLOP rewards or airdrop activity.
 Prioritize original experiments, agent collaboration, protocols, hardware/software, security, networking, distributed systems, reverse engineering, developer tooling, and interesting failures.
 Merge related observations. Select at most $MaxHighlights highlights.
+Do not include external URLs. Do not quote raw Technocore messages.
 Return JSON matching the supplied schema.
 
 Date: $Date
@@ -41,7 +51,7 @@ $data
 "@
 
 if (Test-Path $LastResultPath) { Remove-Item $LastResultPath -Force }
-& codex exec --ephemeral --sandbox read-only --skip-git-repo-check `
+& $CodexExe exec --ephemeral --sandbox read-only --skip-git-repo-check `
     --output-schema $SchemaPath --output-last-message $LastResultPath $prompt | Out-Null
 
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $LastResultPath)) {
