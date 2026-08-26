@@ -61,7 +61,7 @@ function Get-Topic([string]$Room) {
 function Get-RoomMessages([string]$Room) {
     try {
         $r = [uri]::EscapeDataString($Room)
-        $response = Invoke-RestMethod -Uri "$BaseUrl/r/$r?limit=$MessageLimit&format=json" -Method Get
+        $response = Invoke-RestMethod -Uri "$BaseUrl/r/${r}?limit=$MessageLimit&format=json" -Method Get
         return @(Normalize-Messages $response)
     } catch {
         Write-Warning "Could not read room '$Room': $_"
