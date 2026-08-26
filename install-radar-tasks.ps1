@@ -97,7 +97,9 @@ $seedAvailable=(-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentV
     (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("SIGN_SEED","User"))) -or
     (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("SIGN_SEED","Machine")))
 if (-not $seedAvailable -and (Test-Path -LiteralPath $envPath)) {
-    $seedAvailable=@(Get-Content $envPath | Where-Object { $_ -match '^\s*SIGN_SEED\s*=\s*.+$' }).Count -gt 0
+    $seedAvailable=@(Get-Content $envPath | Where-Object {
+        $_ -match '^\s*SIGN_SEED\s*=\s*.+$' -or $_ -match '^\s*\$env:SIGN_SEED\s*=\s*.+$'
+    }).Count -gt 0
 }
 
 Write-Host "Installed or updated scheduled tasks:"

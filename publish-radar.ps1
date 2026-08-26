@@ -15,10 +15,15 @@ function Import-DotEnv([string]$Path) {
     Get-Content $Path | ForEach-Object {
         $line=$_.Trim()
         if (-not $line -or $line.StartsWith("#")) { return }
-        $parts=$line -split "=",2
-        if ($parts.Count -ne 2) { return }
-        $name=$parts[0].Trim()
-        $value=$parts[1].Trim().Trim('"').Trim("'")
+        if ($line -match '^\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+            $name=$matches[1]
+            $value=$matches[2].Trim().Trim('"').Trim("'")
+        } else {
+            $parts=$line -split "=",2
+            if ($parts.Count -ne 2) { return }
+            $name=$parts[0].Trim()
+            $value=$parts[1].Trim().Trim('"').Trim("'")
+        }
         if ($name -match '^[A-Za-z_][A-Za-z0-9_]*$') {
             [Environment]::SetEnvironmentVariable($name,$value,"Process")
         }
@@ -84,14 +89,23 @@ function Get-SigningPython {
     if (-not [string]::IsNullOrWhiteSpace($env:TECHNOCORE_PYTHON)) {
         $candidates += $env:TECHNOCORE_PYTHON
     }
+    $candidates += (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
     $pythonCommand=Get-Command python.exe -ErrorAction SilentlyContinue
     if ($pythonCommand) { $candidates += $pythonCommand.Source }
-    $candidates += (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
 
     foreach ($candidate in @($candidates | Select-Object -Unique)) {
         if (-not (Test-Path -LiteralPath $candidate)) { continue }
-        & $candidate -c "import cryptography" 2>$null
-        if ($LASTEXITCODE -eq 0) { return $candidate }
+        $previousErrorAction=$ErrorActionPreference
+        try {
+            $ErrorActionPreference="Continue"
+            & $candidate -c "import cryptography" *> $null
+            $candidateExitCode=$LASTEXITCODE
+        } catch {
+            $candidateExitCode=1
+        } finally {
+            $ErrorActionPreference=$previousErrorAction
+        }
+        if ($candidateExitCode -eq 0) { return $candidate }
     }
     throw "No trusted local Python runtime with cryptography is available for signing."
 }
