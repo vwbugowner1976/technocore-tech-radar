@@ -68,7 +68,7 @@ while ($true) {
         $r=[uri]::EscapeDataString($room)
 
         try {
-            $response=Invoke-RestMethod -Uri "$BaseUrl/r/$r?since=$lastSeq&format=json" -Method Get
+            $response=Invoke-RestMethod -Uri "$BaseUrl/r/${r}?since=$lastSeq&format=json" -Method Get
         } catch { continue }
 
         $newMessages=@(Normalize-Messages $response | Where-Object { [long]$_.seq -gt $lastSeq })
