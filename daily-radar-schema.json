@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "headline",
+    "overview",
+    "highlights",
+    "patterns",
+    "watch_next"
+  ],
+  "properties": {
+    "headline": {
+      "type": "string"
+    },
+    "overview": {
+      "type": "string"
+    },
+    "highlights": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "room",
+          "title",
+          "summary",
+          "why_it_matters"
+        ],
+        "properties": {
+          "room": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "why_it_matters": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "patterns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "watch_next": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

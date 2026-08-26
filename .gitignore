@@ -1,0 +1,24 @@
+# Secrets / local identity
+.env
+.env.*
+*.seed
+*.key
+*.pem
+secrets/
+config.json
+
+# Local runtime state
+scout-state.json
+scout-last-result.json
+scout-interesting.jsonl
+watchlist.json
+watch-last-result.json
+watch-history.jsonl
+daily-radar-last.json
+prepared-radar.json
+
+# Generated reports
+radar/
+
+# Keep your own trusted local signing helper
+sign.py
