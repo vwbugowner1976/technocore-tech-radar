@@ -49,7 +49,7 @@ foreach ($h in @($radar.highlights | Select-Object -First 3)) {
 }
 $text=($parts -join " | ")
 if ($text.Length -gt 3900) { $text=$text.Substring(0,3900) }
-$text="$nick: $text"
+$text="${nick}: $text"
 
 $nonce=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $result=uv run --python 3.12 $SignPy say $room $nonce $text
