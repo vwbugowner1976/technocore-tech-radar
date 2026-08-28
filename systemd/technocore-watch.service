@@ -1,0 +1,20 @@
+[Unit]
+Description=Technocore Tech Radar watchlist monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stc
+WorkingDirectory=/home/stc/technocore-tech-radar
+ExecStart=/home/stc/technocore-tech-radar/.venv/bin/python /home/stc/technocore-tech-radar/tech_watch.py
+Restart=on-failure
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/stc/technocore-tech-radar
+
+[Install]
+WantedBy=multi-user.target

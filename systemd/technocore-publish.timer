@@ -1,0 +1,11 @@
+[Unit]
+Description=Publish Technocore Tech Radar hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+Unit=technocore-publish.service
+
+[Install]
+WantedBy=timers.target
