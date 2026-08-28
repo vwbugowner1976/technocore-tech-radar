@@ -1,5 +1,8 @@
 {
   "base_url": "https://technocore.chat",
+  "hub_room": "technocore-tech-radar",
+  "did": "did:key:z6Mk...",
+  "nickname": "radar",
   "timezone": "Asia/Tokyo",
   "http_timeout_seconds": 20,
   "max_response_bytes": 5000000,
@@ -14,7 +17,6 @@
   "watchlist_file": "watchlist.json",
   "history_file": "watch-history.jsonl",
   "radar_dir": "radar",
-  "hub_room": "technocore-tech-radar",
   "publish_max_chars": 4096,
   "sign_script": "sign.py",
   "env_file": ".env"

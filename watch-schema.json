@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "classification",
+    "score",
+    "summary",
+    "why_interesting",
+    "risk_notes"
+  ],
+  "properties": {
+    "classification": {
+      "type": "string",
+      "enum": [
+        "interesting",
+        "ignore"
+      ]
+    },
+    "score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "summary": {
+      "type": "string"
+    },
+    "why_interesting": {
+      "type": "string"
+    },
+    "risk_notes": {
+      "type": "string"
+    }
+  }
+}

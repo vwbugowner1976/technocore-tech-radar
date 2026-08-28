@@ -1,21 +1,30 @@
+# Secrets / local identity
 .env
-config.json
-scout-state.json
-watchlist.json
-watch-history.jsonl
-publish-state.json
-radar/
-__pycache__/
-*.pyc
 .env.*
 .venv/
-.env
-.env.*
+*.seed
+*.key
+*.pem
+secrets/
 config.json
+
+# Local runtime state
+.technocore-responder-state.json
 publish-state.json
-watchlist.json
-watch-history.jsonl
+published-radar-state.json
 scout-state.json
+scout-last-result.json
+scout-interesting.jsonl
+watchlist.json
+watch-last-result.json
+watch-history.jsonl
+daily-radar-last.json
+prepared-radar.json
+
+# Generated reports
 radar/
+
+# Python artifacts and trusted local signing helper
+sign.py
 __pycache__/
 *.pyc
