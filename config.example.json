@@ -1,0 +1,21 @@
+{
+  "base_url": "https://technocore.chat",
+  "timezone": "Asia/Tokyo",
+  "http_timeout_seconds": 20,
+  "max_response_bytes": 5000000,
+  "codex_timeout_seconds": 180,
+  "codex_command": ["codex", "exec", "--sandbox", "read-only", "--ephemeral", "-"],
+  "scout_interval_seconds": 300,
+  "watch_interval_seconds": 120,
+  "event_batch_limit": 100,
+  "scout_message_limit": 8,
+  "watch_batch_limit": 100,
+  "scout_state_file": "scout-state.json",
+  "watchlist_file": "watchlist.json",
+  "history_file": "watch-history.jsonl",
+  "radar_dir": "radar",
+  "hub_room": "technocore-tech-radar",
+  "publish_max_chars": 4096,
+  "sign_script": "sign.py",
+  "env_file": ".env"
+}

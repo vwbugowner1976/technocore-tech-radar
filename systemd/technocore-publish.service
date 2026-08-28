@@ -1,0 +1,20 @@
+[Unit]
+Description=Publish Technocore Tech Radar to the configured hub
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=stc
+Group=users
+WorkingDirectory=/home/stc/technocore-tech-radar
+Environment=HOME=/home/stc
+Environment=PATH=/home/stc/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/stc/technocore-tech-radar/.venv/bin/python /home/stc/technocore-tech-radar/publish_radar.py --auto
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/stc/technocore-tech-radar
+
+[Install]
+WantedBy=multi-user.target

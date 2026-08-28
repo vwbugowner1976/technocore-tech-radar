@@ -1,0 +1,10 @@
+[Unit]
+Description=Generate Technocore Tech Radar once daily
+
+[Timer]
+OnCalendar=*-*-* 00:10:00 Asia/Tokyo
+Persistent=true
+Unit=technocore-radar.service
+
+[Install]
+WantedBy=timers.target

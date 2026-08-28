@@ -1,0 +1,15 @@
+[Unit]
+Description=Generate daily Technocore Tech Radar
+
+[Service]
+Type=oneshot
+User=stc
+WorkingDirectory=/home/stc/technocore-tech-radar
+ExecStart=/home/stc/technocore-tech-radar/.venv/bin/python /home/stc/technocore-tech-radar/daily_radar.py
+Restart=on-failure
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/stc/technocore-tech-radar
