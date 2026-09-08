@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TechnoScout v0.1.4: read-only Technocore scout powered by a local LLM."""
+"""TechnoScout v0.2: read-only Technocore scout powered by a local LLM."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 from pathlib import Path
+from collections import Counter
 from typing import Any
 
 from technoscout.common import (
@@ -26,8 +27,7 @@ from technoscout.common import (
     technocore_json,
     utc_now,
 )
-from technoscout.db import connect, get_meta, set_meta
-
+from technoscout.db import (\n    connect,\n    get_meta,\n    record_agent_encounter,\n    record_agent_signal,\n    set_meta,\n    top_agents,\n)\n
 ROOT = Path(__file__).resolve().parent
 
 TRIAGE_PROMPT = """
@@ -74,7 +74,7 @@ def load_config(path: str) -> dict[str, Any]:
         "scout_message_limit": 8,
         "watch_batch_limit": 100,
         "triage_per_cycle": 6,
-        "watch_rooms_per_cycle": 12,
+        "watch_rooms_per_cycle": 6,
         "deep_read_threshold": 70,
         "loop_idle_seconds": 2,
         "http_timeout_seconds": 25,
@@ -87,9 +87,18 @@ def load_config(path: str) -> dict[str, Any]:
         "llm_json_repair": True,
         "llm_json_repair_max_tokens": 320,
         "llm_json_repair_input_chars": 6000,
-        "llm_json_repair_timeout_seconds": 60,
+        "llm_json_repair_timeout_seconds": 30,
         "triage_input_char_budget": 6000,
-        "watch_input_char_budget": 6500,
+        "watch_input_char_budget": 3500,
+        "watch_message_limit": 8,
+        "watch_fetch_limit": 8,
+        "watch_llm_max_tokens": 160,
+        "watch_fast_mode": True,
+        "watch_rooms_per_cycle_cap": 6,
+        "watch_input_char_budget_cap": 3500,
+        "watch_skip_trivial": True,
+        "agent_memory": True,
+        "agent_status_limit": 8,
         "prefilter_keywords": [
             "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
             "embedded", "firmware", "mcu", "usb", "agent", "llm", "mcp", "tooling", "protocol",
@@ -110,6 +119,17 @@ def load_config(path: str) -> dict[str, Any]:
     if not cfg["allow_remote_llm"] and (llm.hostname or "") not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("llm_base_url must be loopback unless allow_remote_llm=true")
     cfg["llm_base_url"] = str(cfg["llm_base_url"]).rstrip("/")
+
+    # v0.2 fast-watch clamps older local configs without requiring a reset.
+    if bool(cfg.get("watch_fast_mode", True)):
+        cfg["watch_rooms_per_cycle"] = min(
+            int(cfg["watch_rooms_per_cycle"]),
+            int(cfg.get("watch_rooms_per_cycle_cap", 6)),
+        )
+        cfg["watch_input_char_budget"] = min(
+            int(cfg.get("watch_input_char_budget", 3500)),
+            int(cfg.get("watch_input_char_budget_cap", 3500)),
+        )
     return cfg
 
 
@@ -171,11 +191,47 @@ def bounded_payload(
     return payload
 
 
+TRIVIAL_WATCH_TEXTS = {
+    "", "ok", "okay", "thanks", "thank you", "thx", "hi", "hello", "hey",
+    "ping", "pong", "gm", "+1", "done", "joined", "ack", "acknowledged",
+}
+
+
+def agent_id_of(item: dict[str, Any]) -> str:
+    value = item.get("from", item.get("did", ""))
+    if isinstance(value, dict):
+        value = value.get("did", value.get("id", value.get("name", "")))
+    agent_id = str(value or "").strip()
+    if agent_id.lower() in {"", "unknown", "system", "server", "technocore", "events"}:
+        return ""
+    return agent_id[:240]
+
+
+def nontrivial_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for item in messages:
+        text = str(item.get("text", item.get("message", ""))).strip()
+        normalized = " ".join(text.lower().split())
+        if normalized in TRIVIAL_WATCH_TEXTS:
+            continue
+        result.append(item)
+    return result
+
+
 class TechnoScout:
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
         self.db = connect(database_path(cfg))
         self.triage_model, self.research_model = resolve_models(cfg)
+
+    def _remember_encounters(self, messages: list[dict[str, Any]], room: str, seen_at: str) -> list[str]:
+        if not bool(self.cfg.get("agent_memory", True)):
+            return []
+        counts = Counter(agent_id_of(item) for item in messages)
+        counts.pop("", None)
+        for agent_id, count in counts.items():
+            record_agent_encounter(self.db, agent_id, room, seen_at, count)
+        return sorted(counts)
 
     def upsert_room(self, room: str, topic: str, source: str) -> None:
         now = utc_now()
@@ -316,6 +372,8 @@ class TechnoScout:
                         str(result.get("reason", ""))[:2000], utc_now(), baseline, room,
                     ),
                 )
+                if state == "selected":
+                    self._remember_encounters(messages, room, utc_now())
                 self.db.commit()
                 print(
                     f"[triage {index}/{total}] OK {elapsed(started)} {room}: {state} "
@@ -358,7 +416,10 @@ class TechnoScout:
                     {
                         "format": "json",
                         "since": last_seq,
-                        "limit": int(self.cfg["watch_batch_limit"]),
+                        "limit": min(
+                            int(self.cfg["watch_batch_limit"]),
+                            int(self.cfg.get("watch_fetch_limit", 8)),
+                        ),
                     },
                 ))
                 now = utc_now()
@@ -366,22 +427,51 @@ class TechnoScout:
                     self.db.execute("UPDATE rooms SET watched_at=? WHERE room=?", (now, room))
                     self.db.commit()
                     continue
+
                 new_last = max([last_seq] + [seq_of(item) for item in messages])
+                batch_agents = self._remember_encounters(messages, room, now)
+                analysis_messages = (
+                    nontrivial_messages(messages)
+                    if bool(self.cfg.get("watch_skip_trivial", True))
+                    else messages
+                )
+                if not analysis_messages:
+                    self.db.execute(
+                        "UPDATE rooms SET last_seq=?, watched_at=?, last_seen=? WHERE room=?",
+                        (new_last, now, now, room),
+                    )
+                    self.db.commit()
+                    print(
+                        f"[watch {index}/{total}] SKIP trivial {elapsed(started)} "
+                        f"room={room} messages={len(messages)} agents={len(batch_agents)}",
+                        flush=True,
+                    )
+                    continue
+
                 payload = bounded_payload(
                     self.cfg,
                     room,
                     row["topic"],
-                    messages,
+                    analysis_messages,
                     "messages",
-                    min(int(self.cfg["watch_batch_limit"]), 24),
-                    int(self.cfg.get("watch_input_char_budget", 6500)),
+                    min(
+                        len(analysis_messages),
+                        int(self.cfg.get("watch_message_limit", 8)),
+                    ),
+                    int(self.cfg.get("watch_input_char_budget", 3500)),
                 )
                 size = len(json.dumps(payload, ensure_ascii=False))
                 print(
                     f"[watch {index}/{total}] room={room} input={size} chars model={self.research_model} start",
                     flush=True,
                 )
-                result = local_llm_json(self.cfg, self.research_model, RESEARCH_PROMPT, payload)
+                result = local_llm_json(
+                    self.cfg,
+                    self.research_model,
+                    RESEARCH_PROMPT,
+                    payload,
+                    max_tokens=int(self.cfg.get("watch_llm_max_tokens", 160)),
+                )
                 allowed = {seq_of(item) for item in messages}
                 evidence = [x for x in result.get("evidence_seqs", []) if isinstance(x, int) and x in allowed]
                 tags = [str(x)[:80] for x in result.get("tags", [])[:12]]
@@ -404,7 +494,32 @@ class TechnoScout:
                             json.dumps(tags, ensure_ascii=False), json.dumps(evidence),
                         ),
                     )
-                    print(f"[signal] {room}: {action} - {str(result.get('summary',''))[:160]}", flush=True)
+                    evidence_agents = []
+                    if evidence:
+                        evidence_set = set(evidence)
+                        evidence_agents = [
+                            agent_id_of(item)
+                            for item in messages
+                            if seq_of(item) in evidence_set and agent_id_of(item)
+                        ]
+                    elif len(batch_agents) == 1:
+                        evidence_agents = batch_agents
+
+                    if evidence_agents:
+                        record_agent_signal(
+                            self.db,
+                            evidence_agents,
+                            room,
+                            now,
+                            tags,
+                            str(result.get("summary", "")),
+                            action == "FOLLOW_UP_CANDIDATE",
+                        )
+                    print(
+                        f"[signal] {room}: {action} agents={len(set(evidence_agents))} - "
+                        f"{str(result.get('summary',''))[:160]}",
+                        flush=True,
+                    )
                 self.db.execute(
                     "UPDATE rooms SET last_seq=?, watched_at=?, last_seen=? WHERE room=?",
                     (new_last, now, now, room),
@@ -442,9 +557,23 @@ class TechnoScout:
         selected = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='selected'").fetchone()["n"]
         pending = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='pending'").fetchone()["n"]
         signals = self.db.execute("SELECT COUNT(*) n FROM observations").fetchone()["n"]
-        print(f"TechnoScout v0.1.4 | rooms={total} selected={selected} pending={pending} signals={signals}")
+        agents = self.db.execute("SELECT COUNT(*) n FROM agents").fetchone()["n"]
+        useful_agents = self.db.execute(
+            "SELECT COUNT(*) n FROM agents WHERE useful_signal_count > 0"
+        ).fetchone()["n"]
+        print(
+            f"TechnoScout v0.2 | rooms={total} selected={selected} pending={pending} "
+            f"signals={signals} agents={agents} useful_agents={useful_agents}"
+        )
         print(f"triage_model={self.triage_model}")
         print(f"research_model={self.research_model}")
+        print(
+            "watch="
+            f"{self.cfg['watch_rooms_per_cycle']} rooms/cycle, "
+            f"{self.cfg.get('watch_fetch_limit',8)} msgs/batch, "
+            f"{self.cfg.get('watch_input_char_budget',3500)} chars, "
+            f"{self.cfg.get('watch_llm_max_tokens',160)} tokens"
+        )
         for row in self.db.execute(
             """
             SELECT room,relevance,technical,people,reason FROM rooms
@@ -458,6 +587,17 @@ class TechnoScout:
             )
 
 
+    def agents_status(self) -> None:
+        rows = top_agents(self.db, int(self.cfg.get("agent_status_limit", 8)))
+        print(f"Agent Memory | known={self.db.execute('SELECT COUNT(*) n FROM agents').fetchone()['n']}")
+        for row in rows:
+            print(
+                f"  {row['agent_id'][:42]:<42} encounters={row['encounter_count']:3} "
+                f"signals={row['useful_signal_count']:2} followups={row['followup_count']:2} "
+                f"room={row['last_room'][:22]} topics={row['topics']}"
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only Technocore scout using a local LLM")
     parser.add_argument("--config", default="technoscout.config.json")
@@ -465,17 +605,21 @@ def main() -> None:
     modes.add_argument("--once", action="store_true")
     modes.add_argument("--loop", action="store_true")
     modes.add_argument("--status", action="store_true")
+    modes.add_argument("--agents", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     scout = TechnoScout(cfg)
     print(
-        f"TechnoScout v0.1.4 READ ONLY | LLM={cfg['llm_base_url']} | DB={database_path(cfg)}",
+        f"TechnoScout v0.2 READ ONLY | LLM={cfg['llm_base_url']} | DB={database_path(cfg)}",
         flush=True,
     )
     try:
         if args.status:
             scout.status()
+            return
+        if args.agents:
+            scout.agents_status()
             return
         if args.once or not args.loop:
             scout.cycle()
