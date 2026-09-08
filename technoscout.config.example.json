@@ -42,6 +42,12 @@
   "watch_skip_trivial": true,
   "agent_memory": true,
   "agent_status_limit": 8,
+  "draft_replies": true,
+  "draft_max_per_cycle": 2,
+  "draft_llm_max_tokens": 180,
+  "draft_timeout_seconds": 30,
+  "draft_min_relationship_score": 0,
+  "draft_status_limit": 12,
   "max_response_bytes": 5000000,
   "allow_remote_llm": false
 }
