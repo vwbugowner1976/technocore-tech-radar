@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""TechnoScout v0.1: read-only Technocore scout powered by a local LLM."""
+"""TechnoScout v0.1.1: read-only Technocore scout powered by a local LLM."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import socket
 import sys
 import time
 import urllib.error
@@ -28,7 +29,6 @@ from technoscout.common import (
 from technoscout.db import connect, get_meta, set_meta
 
 ROOT = Path(__file__).resolve().parent
-
 
 TRIAGE_PROMPT = """
 You are TechnoScout, a defensive technology scout.
@@ -78,11 +78,17 @@ def load_config(path: str) -> dict[str, Any]:
         "deep_read_threshold": 70,
         "loop_idle_seconds": 2,
         "http_timeout_seconds": 25,
-        "llm_timeout_seconds": 120,
+        "llm_timeout_seconds": 90,
         "max_response_bytes": 5000000,
         "seed_rooms": [],
         "project_context": "",
         "allow_remote_llm": False,
+        "prefilter_keywords": [
+            "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
+            "embedded", "firmware", "mcu", "usb", "agent", "llm", "mcp", "tooling", "protocol",
+            "security", "reverse engineering", "distributed", "compiler", "database",
+        ],
+        "prefilter_pass_without_keyword_every": 5,
     }
     for key, value in defaults.items():
         cfg.setdefault(key, value)
@@ -114,6 +120,10 @@ def catalog(payload: Any) -> list[tuple[str, str]]:
             if room:
                 result.append((room, str(item.get("topic", ""))[:4096]))
     return result
+
+
+def elapsed(start: float) -> str:
+    return f"{time.monotonic() - start:.1f}s"
 
 
 class TechnoScout:
@@ -152,7 +162,7 @@ class TechnoScout:
             self.upsert_room(room, topic, "catalog")
         set_meta(self.db, "catalog_refreshed_at", time.time())
         self.db.commit()
-        print(f"[catalog] {len(found)} rooms")
+        print(f"[catalog] {len(found)} rooms", flush=True)
 
     def discover(self) -> None:
         last_seq = int(get_meta(self.db, "events_last_seq", "0") or 0)
@@ -181,52 +191,105 @@ class TechnoScout:
         set_meta(self.db, "events_last_seq", last_seq)
         self.db.commit()
 
-    def triage(self) -> None:
-        rows = self.db.execute(
-            "SELECT * FROM rooms WHERE state='pending' ORDER BY last_seen DESC LIMIT ?",
-            (int(self.cfg["triage_per_cycle"]),),
+    def _prefilter_score(self, room: str, topic: str) -> int:
+        haystack = f"{room} {topic}".lower()
+        score = 0
+        for keyword in self.cfg.get("prefilter_keywords", []):
+            kw = str(keyword).strip().lower()
+            if kw and kw in haystack:
+                score += 10
+        if any(x in haystack for x in ("faucet", "airdrop", "reward", "token", "giveaway")):
+            score -= 20
+        return score
+
+    def _candidate_rows(self) -> list[Any]:
+        pending = self.db.execute(
+            "SELECT * FROM rooms WHERE state='pending' ORDER BY last_seen DESC LIMIT 500"
         ).fetchall()
-        for row in rows:
-            room = row["room"]
-            messages = room_messages(technocore_json(
-                self.cfg, f"/r/{room}",
-                {"format": "json", "limit": int(self.cfg["scout_message_limit"])},
-            ))
-            result = local_llm_json(
-                self.cfg,
-                self.triage_model,
-                TRIAGE_PROMPT,
-                {
-                    "project_context": str(self.cfg["project_context"])[:6000],
-                    "room": room,
-                    "topic": row["topic"],
-                    "recent_messages": compact_messages(messages, int(self.cfg["scout_message_limit"])),
-                },
-            )
-            scores = {k: clamp_score(result.get(k)) for k in ("relevance", "novelty", "technical", "people")}
-            action = str(result.get("action", "IGNORE")).upper()
-            if action not in {"IGNORE", "SAVE", "DEEP_READ"}:
-                action = "IGNORE"
-            state = "selected" if (
-                action in {"SAVE", "DEEP_READ"}
-                or scores["relevance"] >= int(self.cfg["deep_read_threshold"])
-            ) else "ignored"
-            baseline = max((seq_of(item) for item in messages), default=0)
-            self.db.execute(
-                """
-                UPDATE rooms SET state=?, relevance=?, novelty=?, technical=?, people=?,
-                reason=?, triaged_at=?, last_seq=? WHERE room=?
-                """,
-                (
-                    state, scores["relevance"], scores["novelty"], scores["technical"], scores["people"],
-                    str(result.get("reason", ""))[:2000], utc_now(), baseline, room,
-                ),
-            )
-            self.db.commit()
+        if not pending:
+            return []
+        every = max(1, int(self.cfg.get("prefilter_pass_without_keyword_every", 5)))
+        ranked = []
+        for index, row in enumerate(pending):
+            score = self._prefilter_score(row["room"], row["topic"])
+            exploration_bonus = 1 if index % every == 0 else 0
+            ranked.append((score, exploration_bonus, row))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]["last_seen"]), reverse=True)
+        limit = int(self.cfg["triage_per_cycle"])
+        chosen = [item[2] for item in ranked[:limit]]
+        if chosen:
             print(
-                f"[triage] {room}: {state} rel={scores['relevance']} tech={scores['technical']} "
-                f"- {str(result.get('reason',''))[:120]}"
+                "[prefilter] " + ", ".join(
+                    f"{row['room']}({self._prefilter_score(row['room'], row['topic'])})" for row in chosen
+                ),
+                flush=True,
             )
+        return chosen
+
+    def triage(self) -> None:
+        rows = self._candidate_rows()
+        total = len(rows)
+        for index, row in enumerate(rows, start=1):
+            room = row["room"]
+            started = time.monotonic()
+            try:
+                messages = room_messages(technocore_json(
+                    self.cfg, f"/r/{room}",
+                    {"format": "json", "limit": int(self.cfg["scout_message_limit"])},
+                ))
+                payload = {
+                    "project_context": str(self.cfg["project_context"])[:4000],
+                    "room": room,
+                    "topic": str(row["topic"])[:1200],
+                    "recent_messages": compact_messages(messages, int(self.cfg["scout_message_limit"])),
+                }
+                size = len(json.dumps(payload, ensure_ascii=False))
+                print(
+                    f"[triage {index}/{total}] room={room} input={size} chars model={self.triage_model} start",
+                    flush=True,
+                )
+                result = local_llm_json(self.cfg, self.triage_model, TRIAGE_PROMPT, payload)
+                scores = {k: clamp_score(result.get(k)) for k in ("relevance", "novelty", "technical", "people")}
+                action = str(result.get("action", "IGNORE")).upper()
+                if action not in {"IGNORE", "SAVE", "DEEP_READ"}:
+                    action = "IGNORE"
+                state = "selected" if (
+                    action in {"SAVE", "DEEP_READ"}
+                    or scores["relevance"] >= int(self.cfg["deep_read_threshold"])
+                ) else "ignored"
+                baseline = max((seq_of(item) for item in messages), default=0)
+                self.db.execute(
+                    """
+                    UPDATE rooms SET state=?, relevance=?, novelty=?, technical=?, people=?,
+                    reason=?, triaged_at=?, last_seq=? WHERE room=?
+                    """,
+                    (
+                        state, scores["relevance"], scores["novelty"], scores["technical"], scores["people"],
+                        str(result.get("reason", ""))[:2000], utc_now(), baseline, room,
+                    ),
+                )
+                self.db.commit()
+                print(
+                    f"[triage {index}/{total}] OK {elapsed(started)} {room}: {state} "
+                    f"rel={scores['relevance']} tech={scores['technical']} - {str(result.get('reason',''))[:120]}",
+                    flush=True,
+                )
+            except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
+                print(
+                    f"[triage {index}/{total}] TIMEOUT/NETWORK {elapsed(started)} room={room}: "
+                    f"{type(exc).__name__}: {exc} -- skipped",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            except Exception as exc:
+                print(
+                    f"[triage {index}/{total}] ERROR {elapsed(started)} room={room}: "
+                    f"{type(exc).__name__}: {exc} -- skipped",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
 
     def watch(self) -> None:
         rows = self.db.execute(
@@ -236,62 +299,83 @@ class TechnoScout:
             """,
             (int(self.cfg["watch_rooms_per_cycle"]),),
         ).fetchall()
-        for row in rows:
+        total = len(rows)
+        for index, row in enumerate(rows, start=1):
             room = row["room"]
             last_seq = int(row["last_seq"] or 0)
-            messages = room_messages(technocore_json(
-                self.cfg, f"/r/{room}",
-                {
-                    "format": "json",
-                    "since": last_seq,
-                    "limit": int(self.cfg["watch_batch_limit"]),
-                },
-            ))
-            now = utc_now()
-            if not messages:
-                self.db.execute("UPDATE rooms SET watched_at=? WHERE room=?", (now, room))
-                self.db.commit()
-                continue
-            new_last = max([last_seq] + [seq_of(item) for item in messages])
-            result = local_llm_json(
-                self.cfg,
-                self.research_model,
-                RESEARCH_PROMPT,
-                {
-                    "project_context": str(self.cfg["project_context"])[:6000],
+            started = time.monotonic()
+            try:
+                messages = room_messages(technocore_json(
+                    self.cfg, f"/r/{room}",
+                    {
+                        "format": "json",
+                        "since": last_seq,
+                        "limit": int(self.cfg["watch_batch_limit"]),
+                    },
+                ))
+                now = utc_now()
+                if not messages:
+                    self.db.execute("UPDATE rooms SET watched_at=? WHERE room=?", (now, room))
+                    self.db.commit()
+                    continue
+                new_last = max([last_seq] + [seq_of(item) for item in messages])
+                payload = {
+                    "project_context": str(self.cfg["project_context"])[:4000],
                     "room": room,
-                    "topic": row["topic"],
-                    "messages": compact_messages(messages, int(self.cfg["watch_batch_limit"])),
-                },
-            )
-            allowed = {seq_of(item) for item in messages}
-            evidence = [x for x in result.get("evidence_seqs", []) if isinstance(x, int) and x in allowed]
-            tags = [str(x)[:80] for x in result.get("tags", [])[:12]]
-            action = str(result.get("action", "IGNORE")).upper()
-            if action not in {"IGNORE", "SAVE", "FOLLOW_UP_CANDIDATE"}:
-                action = "IGNORE"
-            if result.get("meaningful") is True:
-                self.db.execute(
-                    """
-                    INSERT INTO observations(
-                      observed_at,room,from_seq,through_seq,relevance,novelty,technical,people,
-                      action,summary,tags_json,evidence_json
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        now, room, last_seq + 1, new_last,
-                        clamp_score(result.get("relevance")), clamp_score(result.get("novelty")),
-                        clamp_score(result.get("technical")), clamp_score(result.get("people")),
-                        action, str(result.get("summary", ""))[:3000],
-                        json.dumps(tags, ensure_ascii=False), json.dumps(evidence),
-                    ),
+                    "topic": str(row["topic"])[:1200],
+                    "messages": compact_messages(messages, min(int(self.cfg["watch_batch_limit"]), 24)),
+                }
+                size = len(json.dumps(payload, ensure_ascii=False))
+                print(
+                    f"[watch {index}/{total}] room={room} input={size} chars model={self.research_model} start",
+                    flush=True,
                 )
-                print(f"[signal] {room}: {action} - {str(result.get('summary',''))[:160]}")
-            self.db.execute(
-                "UPDATE rooms SET last_seq=?, watched_at=?, last_seen=? WHERE room=?",
-                (new_last, now, now, room),
-            )
-            self.db.commit()
+                result = local_llm_json(self.cfg, self.research_model, RESEARCH_PROMPT, payload)
+                allowed = {seq_of(item) for item in messages}
+                evidence = [x for x in result.get("evidence_seqs", []) if isinstance(x, int) and x in allowed]
+                tags = [str(x)[:80] for x in result.get("tags", [])[:12]]
+                action = str(result.get("action", "IGNORE")).upper()
+                if action not in {"IGNORE", "SAVE", "FOLLOW_UP_CANDIDATE"}:
+                    action = "IGNORE"
+                if result.get("meaningful") is True:
+                    self.db.execute(
+                        """
+                        INSERT INTO observations(
+                          observed_at,room,from_seq,through_seq,relevance,novelty,technical,people,
+                          action,summary,tags_json,evidence_json
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            now, room, last_seq + 1, new_last,
+                            clamp_score(result.get("relevance")), clamp_score(result.get("novelty")),
+                            clamp_score(result.get("technical")), clamp_score(result.get("people")),
+                            action, str(result.get("summary", ""))[:3000],
+                            json.dumps(tags, ensure_ascii=False), json.dumps(evidence),
+                        ),
+                    )
+                    print(f"[signal] {room}: {action} - {str(result.get('summary',''))[:160]}", flush=True)
+                self.db.execute(
+                    "UPDATE rooms SET last_seq=?, watched_at=?, last_seen=? WHERE room=?",
+                    (new_last, now, now, room),
+                )
+                self.db.commit()
+                print(f"[watch {index}/{total}] OK {elapsed(started)} room={room}", flush=True)
+            except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
+                print(
+                    f"[watch {index}/{total}] TIMEOUT/NETWORK {elapsed(started)} room={room}: "
+                    f"{type(exc).__name__}: {exc} -- skipped",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            except Exception as exc:
+                print(
+                    f"[watch {index}/{total}] ERROR {elapsed(started)} room={room}: "
+                    f"{type(exc).__name__}: {exc} -- skipped",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
 
     def cycle(self) -> None:
         self.seed()
@@ -307,7 +391,7 @@ class TechnoScout:
         selected = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='selected'").fetchone()["n"]
         pending = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='pending'").fetchone()["n"]
         signals = self.db.execute("SELECT COUNT(*) n FROM observations").fetchone()["n"]
-        print(f"TechnoScout v0.1 | rooms={total} selected={selected} pending={pending} signals={signals}")
+        print(f"TechnoScout v0.1.1 | rooms={total} selected={selected} pending={pending} signals={signals}")
         print(f"triage_model={self.triage_model}")
         print(f"research_model={self.research_model}")
         for row in self.db.execute(
@@ -335,7 +419,7 @@ def main() -> None:
     cfg = load_config(args.config)
     scout = TechnoScout(cfg)
     print(
-        f"TechnoScout v0.1 READ ONLY | LLM={cfg['llm_base_url']} | DB={database_path(cfg)}",
+        f"TechnoScout v0.1.1 READ ONLY | LLM={cfg['llm_base_url']} | DB={database_path(cfg)}",
         flush=True,
     )
     try:
@@ -353,7 +437,7 @@ def main() -> None:
                 print(f"[rate-limit] sleep {exc.wait_seconds:.1f}s", flush=True)
                 time.sleep(exc.wait_seconds)
                 continue
-            except (urllib.error.URLError, TimeoutError) as exc:
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
                 print(f"[network] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                 time.sleep(10)
                 continue
