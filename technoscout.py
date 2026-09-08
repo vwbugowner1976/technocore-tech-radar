@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TechnoScout v0.1.3: read-only Technocore scout powered by a local LLM."""
+"""TechnoScout v0.1.4: read-only Technocore scout powered by a local LLM."""
 
 from __future__ import annotations
 
@@ -442,7 +442,7 @@ class TechnoScout:
         selected = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='selected'").fetchone()["n"]
         pending = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='pending'").fetchone()["n"]
         signals = self.db.execute("SELECT COUNT(*) n FROM observations").fetchone()["n"]
-        print(f"TechnoScout v0.1.3 | rooms={total} selected={selected} pending={pending} signals={signals}")
+        print(f"TechnoScout v0.1.4 | rooms={total} selected={selected} pending={pending} signals={signals}")
         print(f"triage_model={self.triage_model}")
         print(f"research_model={self.research_model}")
         for row in self.db.execute(
@@ -470,7 +470,7 @@ def main() -> None:
     cfg = load_config(args.config)
     scout = TechnoScout(cfg)
     print(
-        f"TechnoScout v0.1.3 READ ONLY | LLM={cfg['llm_base_url']} | DB={database_path(cfg)}",
+        f"TechnoScout v0.1.4 READ ONLY | LLM={cfg['llm_base_url']} | DB={database_path(cfg)}",
         flush=True,
     )
     try:
