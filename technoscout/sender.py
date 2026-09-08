@@ -7,12 +7,14 @@ import base64
 import json
 import os
 import re
+import stat
 import time
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .common import room_messages, safe_room
@@ -63,11 +65,52 @@ class SigningIdentity:
     seed: bytes
     did: str
 
+    @staticmethod
+    def _seed_from_file(env_name: str, env_file: str) -> str:
+        path = Path(env_file).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.exists():
+            return ""
+
+        info = path.stat()
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise RuntimeError(f"{path} is not owned by the current user")
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o077:
+            raise RuntimeError(
+                f"{path} permissions are too broad ({oct(mode)}); run chmod 600 {path}"
+            )
+
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != env_name:
+                continue
+            value = value.strip()
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in {"'", '"'}
+            ):
+                value = value[1:-1]
+            return value.strip()
+        return ""
+
     @classmethod
-    def from_env(cls, env_name: str) -> "SigningIdentity":
+    def from_env(
+        cls,
+        env_name: str,
+        env_file: str = "",
+    ) -> "SigningIdentity":
         value = os.environ.get(env_name, "").strip()
+        if not value and env_file:
+            value = cls._seed_from_file(env_name, env_file)
         if not value:
-            raise RuntimeError(f"{env_name} is not set")
+            suffix = f" or {env_file}" if env_file else ""
+            raise RuntimeError(f"{env_name} is not set{suffix}")
         if not SEED_RE.fullmatch(value):
             raise ValueError(f"{env_name} must be exactly 64 hexadecimal characters")
         seed = bytes.fromhex(value)
@@ -116,7 +159,8 @@ class ApprovedDraftSender:
         self.cfg = cfg
         self.db = db
         self.identity = SigningIdentity.from_env(
-            str(cfg.get("signing_seed_env", "SIGN_SEED"))
+            str(cfg.get("signing_seed_env", "SIGN_SEED")),
+            str(cfg.get("signing_env_file", ".env")),
         )
 
     def _read_server_nonce(self, room: str) -> int:
