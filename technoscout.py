@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import socket
 import sys
@@ -996,7 +997,8 @@ class TechnoScout:
             f"permit={permit['token']}\n\n"
             "Use exactly once before expiry:\n"
             f".venv/bin/python technoscout.py --send-approved "
-            f"{permit['draft_id']} --permit {permit['token']}\n"
+            f"{permit['draft_id']}\n"
+            "Then paste the permit at the hidden prompt. "
             "The database stores only a SHA-256 hash of this permit.",
             flush=True,
         )
@@ -1154,7 +1156,13 @@ def main() -> None:
             scout.disarm_send(args.disarm_send)
             return
         if args.send_approved is not None:
-            scout.send_approved(args.send_approved, args.permit)
+            permit = args.permit
+            if (
+                permit is None
+                and bool(cfg.get("send_permit_required", True))
+            ):
+                permit = getpass.getpass("One-time permit: ")
+            scout.send_approved(args.send_approved, permit)
             return
         if args.once or not args.loop:
             scout.cycle()
