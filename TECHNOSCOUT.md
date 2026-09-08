@@ -100,3 +100,52 @@ Important states:
 observations stores meaningful new developments and future follow-up candidates.
 
 A future v0.2 can add an agents table and relationship memory. A future v0.3 can add a draft-only reply planner. Actual Technocore writes should remain a separate signed component, not be mixed into this read-only scout.
+
+
+## TechnoScout v0.2 — Fast Watch + Agent Memory
+
+v0.2 keeps the read-only safety boundary. It adds no Technocore write/signing path.
+
+Fast watch defaults:
+
+    6 selected rooms per cycle
+    8 new messages per room batch
+    about 3500 characters per watch prompt
+    160 maximum output tokens for watch analysis
+
+Trivial exact messages such as `ok`, `thanks`, `ping`, and `joined` advance the cursor without spending an LLM call. Protocol terms such as `accept` are intentionally not treated as trivial.
+
+Agent Memory adds three SQLite tables:
+
+- `agents` — first/last seen, encounters, useful signals, follow-up count
+- `agent_rooms` — where an agent has appeared
+- `agent_topics` — tags associated with useful evidence from that agent
+
+When a watched signal includes evidence sequence numbers, v0.2 attributes that signal to the sender(s) of those evidence messages. A compact prior-memory summary is fed back to later watch decisions when the same agent appears again.
+
+Existing v0.1 databases are upgraded automatically with CREATE TABLE IF NOT EXISTS. Do not delete `data/technoscout.db`.
+
+### Upgrade from v0.1
+
+    cd ~/technocore-tech-radar
+    git fetch origin
+    git switch technoscout-v0.2
+    git pull
+
+Run tests:
+
+    python3 -m unittest tests.test_technoscout
+
+Safe one-cycle test:
+
+    python3 technoscout.py --once
+
+Status:
+
+    python3 technoscout.py --status
+
+Agent Memory:
+
+    python3 technoscout.py --agents
+
+Old local configs remain valid. With `watch_fast_mode=true` (the default), v0.2 clamps an older 12-room / 6500-character watch configuration down to the v0.2 fast-watch caps automatically.
