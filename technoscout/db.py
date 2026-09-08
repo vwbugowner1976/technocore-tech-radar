@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite persistence for TechnoScout v0.5."""
+"""SQLite persistence for TechnoScout v0.6."""
 
 from __future__ import annotations
 
@@ -97,6 +97,22 @@ CREATE TABLE IF NOT EXISTS reply_drafts (
 );
 CREATE INDEX IF NOT EXISTS idx_reply_drafts_status
     ON reply_drafts(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS send_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id INTEGER NOT NULL,
+    attempted_at TEXT NOT NULL,
+    did TEXT NOT NULL,
+    room TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    sig TEXT NOT NULL,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL,
+    http_status INTEGER,
+    detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_send_attempts_draft
+    ON send_attempts(draft_id, id DESC);
 """
 
 
@@ -416,3 +432,126 @@ def reply_draft_counts(con: sqlite3.Connection) -> dict[str, int]:
     for row in rows:
         result[str(row["status"])] = int(row["n"])
     return result
+
+
+
+def set_draft_status(
+    con: sqlite3.Connection,
+    draft_id: int,
+    status: str,
+) -> None:
+    cur = con.execute(
+        "UPDATE reply_drafts SET status=? WHERE id=?",
+        (str(status), int(draft_id)),
+    )
+    if cur.rowcount != 1:
+        raise ValueError(f"draft #{draft_id} not found")
+
+
+def reserve_send_nonce(
+    con: sqlite3.Connection,
+    did: str,
+    room: str,
+    server_nonce: int = 0,
+    floor: int = 0,
+) -> int:
+    key = f"send_nonce:{did}:{room}"
+    local = int(get_meta(con, key, "0") or 0)
+    value = max(
+        int(floor),
+        local + 1,
+        max(0, int(server_nonce)) + 1,
+        1,
+    )
+    if value >= 10**19:
+        raise ValueError("nonce exceeds Technocore 19-digit limit")
+    set_meta(con, key, value)
+    return value
+
+
+def create_send_attempt(
+    con: sqlite3.Connection,
+    draft_id: int,
+    attempted_at: str,
+    did: str,
+    room: str,
+    nonce: int,
+    signature: str,
+    text: str,
+) -> int:
+    cur = con.execute(
+        """
+        INSERT INTO send_attempts(
+          draft_id,attempted_at,did,room,nonce,sig,text,status
+        ) VALUES(?,?,?,?,?,?,?,'reserved')
+        """,
+        (
+            int(draft_id),
+            attempted_at,
+            did[:240],
+            room[:80],
+            str(int(nonce)),
+            signature[:120],
+            text[:4096],
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def finish_send_attempt(
+    con: sqlite3.Connection,
+    attempt_id: int,
+    status: str,
+    http_status: int | None,
+    detail: str,
+) -> None:
+    cur = con.execute(
+        """
+        UPDATE send_attempts
+        SET status=?, http_status=?, detail=?
+        WHERE id=?
+        """,
+        (
+            str(status),
+            int(http_status) if http_status is not None else None,
+            str(detail)[:2000],
+            int(attempt_id),
+        ),
+    )
+    if cur.rowcount != 1:
+        raise ValueError(f"send attempt #{attempt_id} not found")
+
+
+def get_last_send_attempt(
+    con: sqlite3.Connection,
+    draft_id: int,
+) -> sqlite3.Row | None:
+    return con.execute(
+        """
+        SELECT id,draft_id,attempted_at,did,room,nonce,sig,text,status,
+               http_status,detail
+        FROM send_attempts
+        WHERE draft_id=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (int(draft_id),),
+    ).fetchone()
+
+
+def send_attempts_for_draft(
+    con: sqlite3.Connection,
+    draft_id: int,
+    limit: int = 10,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT id,draft_id,attempted_at,did,room,nonce,sig,text,status,
+               http_status,detail
+        FROM send_attempts
+        WHERE draft_id=?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (int(draft_id), max(1, int(limit))),
+    ).fetchall()
