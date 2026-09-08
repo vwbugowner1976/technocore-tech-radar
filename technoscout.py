@@ -147,6 +147,7 @@ def load_config(path: str) -> dict[str, Any]:
         "retriage_selected_limit": 100,
         "sending_enabled": False,
         "signing_seed_env": "SIGN_SEED",
+        "signing_env_file": ".env",
         "sender_timeout_seconds": 20,
         "prefilter_keywords": [
             "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
@@ -900,7 +901,10 @@ class TechnoScout:
         env_name = str(self.cfg.get("signing_seed_env", "SIGN_SEED"))
         enabled = bool(self.cfg.get("sending_enabled", False))
         try:
-            identity = SigningIdentity.from_env(env_name)
+            identity = SigningIdentity.from_env(
+                env_name,
+                str(self.cfg.get("signing_env_file", ".env")),
+            )
             identity_status = f"ready did={identity.did}"
         except Exception as exc:
             identity_status = f"not-ready ({type(exc).__name__}: {exc})"
