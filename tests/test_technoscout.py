@@ -327,7 +327,7 @@ class SenderCryptoTests(unittest.TestCase):
         except BaseException:
             self.skipTest("cryptography is not installed")
 
-        legacy_value = "A" * 64
+        legacy_value = "G" * 64
         self.assertFalse(all(ch in "0123456789abcdefABCDEF" for ch in legacy_value))
         old = os.environ.get("TECHNOSCOUT_TEST_LEGACY")
         os.environ["TECHNOSCOUT_TEST_LEGACY"] = legacy_value
