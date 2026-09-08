@@ -672,3 +672,19 @@ def send_permits_for_draft(
         """,
         (int(draft_id), max(1, int(limit))),
     ).fetchall()
+
+
+
+def revoke_send_permits(
+    con: sqlite3.Connection,
+    draft_id: int,
+) -> int:
+    cur = con.execute(
+        """
+        UPDATE send_permits
+        SET status='revoked'
+        WHERE draft_id=? AND status='armed'
+        """,
+        (int(draft_id),),
+    )
+    return int(cur.rowcount)
