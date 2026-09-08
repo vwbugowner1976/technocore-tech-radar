@@ -126,6 +126,7 @@ def load_config(path: str) -> dict[str, Any]:
         "draft_replies": True,
         "draft_max_per_cycle": 2,
         "draft_llm_max_tokens": 180,
+        "draft_timeout_seconds": 30,
         "draft_min_relationship_score": 0,
         "draft_status_limit": 12,
         "prefilter_keywords": [
@@ -589,45 +590,56 @@ class TechnoScout:
                             if relationship["score"] >= int(
                                 self.cfg.get("draft_min_relationship_score", 0)
                             ):
-                                draft_payload = {
-                                    "room": room,
-                                    "signal_summary": str(result.get("summary", ""))[:1200],
-                                    "tags": tags[:8],
-                                    "target_agent": relationship,
-                                    "evidence_messages": compact_messages(
-                                        [
-                                            item for item in messages
-                                            if not evidence or seq_of(item) in set(evidence)
-                                        ],
-                                        4,
-                                    ),
-                                }
-                                draft_result = local_llm_json(
-                                    self.cfg,
-                                    self.research_model,
-                                    DRAFT_PROMPT,
-                                    draft_payload,
-                                    max_tokens=int(self.cfg.get("draft_llm_max_tokens", 180)),
-                                )
-                                draft_text = str(draft_result.get("draft", "")).strip()
-                                if draft_text:
-                                    created = create_reply_draft(
-                                        self.db,
-                                        now,
-                                        room,
-                                        new_last,
-                                        target_agent,
-                                        relationship["score"],
-                                        str(draft_result.get("reason", "")),
-                                        draft_text,
+                                try:
+                                    draft_payload = {
+                                        "room": room,
+                                        "signal_summary": str(result.get("summary", ""))[:1200],
+                                        "tags": tags[:8],
+                                        "target_agent": relationship,
+                                        "evidence_messages": compact_messages(
+                                            [
+                                                item for item in messages
+                                                if not evidence or seq_of(item) in set(evidence)
+                                            ],
+                                            4,
+                                        ),
+                                    }
+                                    draft_result = local_llm_json(
+                                        self.cfg,
+                                        self.research_model,
+                                        DRAFT_PROMPT,
+                                        draft_payload,
+                                        max_tokens=int(self.cfg.get("draft_llm_max_tokens", 180)),
+                                        timeout_seconds=float(
+                                            self.cfg.get("draft_timeout_seconds", 30)
+                                        ),
                                     )
-                                    if created:
-                                        drafts_created += 1
-                                        print(
-                                            f"[draft] room={room} target={target_agent[:28]} "
-                                            f"relationship={relationship['score']} created",
-                                            flush=True,
+                                    draft_text = str(draft_result.get("draft", "")).strip()
+                                    if draft_text:
+                                        created = create_reply_draft(
+                                            self.db,
+                                            now,
+                                            room,
+                                            new_last,
+                                            target_agent,
+                                            relationship["score"],
+                                            str(draft_result.get("reason", "")),
+                                            draft_text,
                                         )
+                                        if created:
+                                            drafts_created += 1
+                                            print(
+                                                f"[draft] room={room} target={target_agent[:28]} "
+                                                f"relationship={relationship['score']} created",
+                                                flush=True,
+                                            )
+                                except Exception as exc:
+                                    print(
+                                        f"[draft] ERROR room={room}: {type(exc).__name__}: "
+                                        f"{exc} -- signal kept, draft skipped",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
                 self.db.execute(
                     "UPDATE rooms SET last_seq=?, watched_at=?, last_seen=? WHERE room=?",
                     (new_last, now, now, room),
