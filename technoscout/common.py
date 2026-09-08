@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for TechnoScout v0.4."""
+"""Shared helpers for TechnoScout v0.5."""
 
 from __future__ import annotations
 
@@ -307,6 +307,11 @@ def resolve_models(cfg: dict[str, Any], backend: Any) -> tuple[str, str]:
     if not research:
         research = max(models, key=lambda x: (_model_size(x), x))
     return triage, research
+
+
+def normalize_evidence_source(value: Any) -> str:
+    source = str(value or "").strip().lower()
+    return source if source in {"topic", "messages", "none"} else "none"
 
 
 def clamp_score(value: Any) -> int:
