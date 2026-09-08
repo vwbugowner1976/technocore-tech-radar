@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TechnoScout v0.1.1: read-only Technocore scout powered by a local LLM."""
+"""TechnoScout v0.1.2: read-only Technocore scout powered by a local LLM."""
 
 from __future__ import annotations
 
@@ -83,6 +83,12 @@ def load_config(path: str) -> dict[str, Any]:
         "seed_rooms": [],
         "project_context": "",
         "allow_remote_llm": False,
+        "llm_max_tokens": 320,
+        "llm_json_repair": True,
+        "llm_json_repair_max_tokens": 320,
+        "llm_json_repair_input_chars": 6000,
+        "triage_input_char_budget": 6000,
+        "watch_input_char_budget": 6500,
         "prefilter_keywords": [
             "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
             "embedded", "firmware", "mcu", "usb", "agent", "llm", "mcp", "tooling", "protocol",
@@ -124,6 +130,44 @@ def catalog(payload: Any) -> list[tuple[str, str]]:
 
 def elapsed(start: float) -> str:
     return f"{time.monotonic() - start:.1f}s"
+
+
+def bounded_payload(
+    cfg: dict[str, Any],
+    room: str,
+    topic: str,
+    messages: list[dict[str, Any]],
+    message_key: str,
+    maximum_messages: int,
+    char_budget: int,
+) -> dict[str, Any]:
+    """Keep the newest useful messages while bounding local-LLM prompt size."""
+    budget = max(1800, int(char_budget))
+    payload = {
+        "project_context": str(cfg["project_context"])[:1800],
+        "room": room,
+        "topic": str(topic)[:700],
+        message_key: compact_messages(messages, maximum_messages),
+    }
+
+    def size() -> int:
+        return len(json.dumps(payload, ensure_ascii=False))
+
+    while size() > budget and len(payload[message_key]) > 1:
+        payload[message_key].pop(0)
+
+    if size() > budget and payload[message_key]:
+        item = payload[message_key][-1]
+        text = str(item.get("text", ""))
+        overflow = size() - budget
+        keep = max(200, len(text) - overflow - 200)
+        item["text"] = text[:keep]
+
+    if size() > budget:
+        payload["project_context"] = str(payload["project_context"])[:1000]
+        payload["topic"] = str(payload["topic"])[:400]
+
+    return payload
 
 
 class TechnoScout:
@@ -237,12 +281,15 @@ class TechnoScout:
                     self.cfg, f"/r/{room}",
                     {"format": "json", "limit": int(self.cfg["scout_message_limit"])},
                 ))
-                payload = {
-                    "project_context": str(self.cfg["project_context"])[:4000],
-                    "room": room,
-                    "topic": str(row["topic"])[:1200],
-                    "recent_messages": compact_messages(messages, int(self.cfg["scout_message_limit"])),
-                }
+                payload = bounded_payload(
+                    self.cfg,
+                    room,
+                    row["topic"],
+                    messages,
+                    "recent_messages",
+                    int(self.cfg["scout_message_limit"]),
+                    int(self.cfg.get("triage_input_char_budget", 6000)),
+                )
                 size = len(json.dumps(payload, ensure_ascii=False))
                 print(
                     f"[triage {index}/{total}] room={room} input={size} chars model={self.triage_model} start",
@@ -319,12 +366,15 @@ class TechnoScout:
                     self.db.commit()
                     continue
                 new_last = max([last_seq] + [seq_of(item) for item in messages])
-                payload = {
-                    "project_context": str(self.cfg["project_context"])[:4000],
-                    "room": room,
-                    "topic": str(row["topic"])[:1200],
-                    "messages": compact_messages(messages, min(int(self.cfg["watch_batch_limit"]), 24)),
-                }
+                payload = bounded_payload(
+                    self.cfg,
+                    room,
+                    row["topic"],
+                    messages,
+                    "messages",
+                    min(int(self.cfg["watch_batch_limit"]), 24),
+                    int(self.cfg.get("watch_input_char_budget", 6500)),
+                )
                 size = len(json.dumps(payload, ensure_ascii=False))
                 print(
                     f"[watch {index}/{total}] room={room} input={size} chars model={self.research_model} start",
@@ -391,7 +441,7 @@ class TechnoScout:
         selected = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='selected'").fetchone()["n"]
         pending = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='pending'").fetchone()["n"]
         signals = self.db.execute("SELECT COUNT(*) n FROM observations").fetchone()["n"]
-        print(f"TechnoScout v0.1.1 | rooms={total} selected={selected} pending={pending} signals={signals}")
+        print(f"TechnoScout v0.1.2 | rooms={total} selected={selected} pending={pending} signals={signals}")
         print(f"triage_model={self.triage_model}")
         print(f"research_model={self.research_model}")
         for row in self.db.execute(
@@ -419,7 +469,7 @@ def main() -> None:
     cfg = load_config(args.config)
     scout = TechnoScout(cfg)
     print(
-        f"TechnoScout v0.1.1 READ ONLY | LLM={cfg['llm_base_url']} | DB={database_path(cfg)}",
+        f"TechnoScout v0.1.2 READ ONLY | LLM={cfg['llm_base_url']} | DB={database_path(cfg)}",
         flush=True,
     )
     try:
