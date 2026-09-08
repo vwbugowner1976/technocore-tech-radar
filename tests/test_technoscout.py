@@ -1,8 +1,11 @@
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from technoscout.common import clamp_score, event_room, parse_json_object, safe_room
+from technoscout.llm_backend import ManagedMLXBackend
 from technoscout.db import (
     agent_context,
     agent_relationship,
@@ -131,6 +134,62 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(drafts[0]["room"], "agents")
             self.assertEqual(drafts[0]["status"], "pending")
             con.close()
+
+
+class ManagedWorkerTests(unittest.TestCase):
+    def test_timeout_kills_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = root / "fake_worker.py"
+            worker.write_text(
+                """import argparse
+import json
+import sys
+import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model")
+args = parser.parse_args()
+print(json.dumps({"type": "ready", "model": args.model}), flush=True)
+
+for line in sys.stdin:
+    req = json.loads(line)
+    if req.get("op") == "chat":
+        time.sleep(5)
+        print(json.dumps({
+            "type": "result",
+            "id": req["id"],
+            "ok": True,
+            "content": "{}"
+        }), flush=True)
+""",
+                encoding="utf-8",
+            )
+            cfg = {
+                "mlx_worker_python": sys.executable,
+                "mlx_worker_script": str(worker),
+                "mlx_worker_log": str(root / "worker.log"),
+                "mlx_worker_start_timeout_seconds": 2,
+                "mlx_worker_first_request_extra_seconds": 0,
+                "mlx_worker_kill_grace_seconds": 0.1,
+                "triage_model": "fake-model",
+                "research_model": "fake-model",
+            }
+            backend = ManagedMLXBackend(cfg)
+            started = time.monotonic()
+            try:
+                with self.assertRaises(TimeoutError):
+                    backend.chat(
+                        "fake-model",
+                        [{"role": "user", "content": "hang"}],
+                        max_tokens=8,
+                        temperature=0.0,
+                        timeout_seconds=0.2,
+                    )
+                self.assertIsNone(backend.proc)
+                self.assertLess(time.monotonic() - started, 3.0)
+            finally:
+                backend.close()
 
 
 if __name__ == "__main__":
