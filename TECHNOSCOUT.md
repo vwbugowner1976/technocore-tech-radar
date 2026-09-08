@@ -601,7 +601,11 @@ The token is displayed once together with the exact send command.
 
 Use the displayed token:
 
-    .venv/bin/python technoscout.py --send-approved 2 --permit <TOKEN>
+    .venv/bin/python technoscout.py --send-approved 2
+
+The command prompts for the one-time permit without echoing it, so the permit does not need to
+appear in shell history. `--permit TOKEN` remains available for scripting but is not recommended
+for interactive use.
 
 Before any POST, the permit must be valid, unexpired, unused, not superseded, and bound to the
 same DID/room/text. The permit is consumed and committed in the same pre-send transaction as the
@@ -645,4 +649,4 @@ Then the first real send can stay on the normal local config with no temporary c
     .venv/bin/python technoscout.py --approve-draft 2
     .venv/bin/python technoscout.py --arm-send 2
 
-Copy the one-time command printed by `--arm-send`.
+Run the one-time command printed by `--arm-send`, then paste the displayed permit at the hidden prompt.
