@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for TechnoScout v0.3."""
+"""Shared helpers for TechnoScout v0.4."""
 
 from __future__ import annotations
 
@@ -178,26 +178,27 @@ def parse_json_object(text: str) -> dict[str, Any]:
 
 def _chat_content(
     cfg: dict[str, Any],
+    backend: Any,
     payload: dict[str, Any],
     timeout_seconds: float | None = None,
 ) -> str:
-    request = urllib.request.Request(
-        cfg["llm_base_url"] + "/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
+    timeout = float(
+        timeout_seconds
+        if timeout_seconds is not None
+        else cfg["llm_timeout_seconds"]
     )
-    timeout = float(timeout_seconds if timeout_seconds is not None else cfg["llm_timeout_seconds"])
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = json.loads(response.read(int(cfg["max_response_bytes"])).decode("utf-8"))
-    try:
-        return str(raw["choices"][0]["message"]["content"])
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("local LLM response missing choices[0].message.content") from exc
+    return backend.chat(
+        model=str(payload["model"]),
+        messages=list(payload["messages"]),
+        max_tokens=int(payload.get("max_tokens", cfg.get("llm_max_tokens", 320))),
+        temperature=float(payload.get("temperature", 0.0)),
+        timeout_seconds=timeout,
+    )
 
 
 def local_llm_json(
     cfg: dict[str, Any],
+    backend: Any,
     model: str,
     system_prompt: str,
     untrusted_data: Any,
@@ -207,7 +208,9 @@ def local_llm_json(
     payload = {
         "model": model,
         "temperature": 0.1,
-        "max_tokens": int(max_tokens if max_tokens is not None else cfg.get("llm_max_tokens", 320)),
+        "max_tokens": int(
+            max_tokens if max_tokens is not None else cfg.get("llm_max_tokens", 320)
+        ),
         "messages": [
             {"role": "system", "content": system_prompt},
             {
@@ -218,7 +221,12 @@ def local_llm_json(
             },
         ],
     }
-    content = _chat_content(cfg, payload, timeout_seconds=timeout_seconds)
+    content = _chat_content(
+        cfg,
+        backend,
+        payload,
+        timeout_seconds=timeout_seconds,
+    )
     try:
         return parse_json_object(content)
     except LLMJsonError as first:
@@ -256,7 +264,12 @@ def local_llm_json(
         float(cfg.get("llm_json_repair_timeout_seconds", 60)),
     )
     print(f"[llm-json] repair start timeout={repair_timeout:.0f}s", flush=True)
-    repaired = _chat_content(cfg, repair_payload, timeout_seconds=repair_timeout)
+    repaired = _chat_content(
+        cfg,
+        backend,
+        repair_payload,
+        timeout_seconds=repair_timeout,
+    )
     try:
         value = parse_json_object(repaired)
         print("[llm-json] repair OK", flush=True)
@@ -268,16 +281,9 @@ def local_llm_json(
             repaired=True,
         ) from None
 
-def available_models(cfg: dict[str, Any]) -> list[str]:
-    request = urllib.request.Request(
-        cfg["llm_base_url"] + "/models",
-        headers={"Accept": "application/json"},
-        method="GET",
-    )
-    with urllib.request.urlopen(request, timeout=float(cfg["llm_timeout_seconds"])) as response:
-        payload = json.loads(response.read(int(cfg["max_response_bytes"])).decode("utf-8"))
-    items = payload.get("data", []) if isinstance(payload, dict) else []
-    return [str(item["id"]) for item in items if isinstance(item, dict) and item.get("id")]
+
+def available_models(cfg: dict[str, Any], backend: Any) -> list[str]:
+    return [str(x) for x in backend.models() if str(x).strip()]
 
 
 def _model_size(name: str) -> float:
@@ -285,12 +291,17 @@ def _model_size(name: str) -> float:
     return max(values) if values else 0.0
 
 
-def resolve_models(cfg: dict[str, Any]) -> tuple[str, str]:
-    models = available_models(cfg)
-    triage = str(cfg.get("triage_model") or "")
-    research = str(cfg.get("research_model") or "")
+def resolve_models(cfg: dict[str, Any], backend: Any) -> tuple[str, str]:
+    triage = str(cfg.get("triage_model") or "").strip()
+    research = str(cfg.get("research_model") or "").strip()
+    if triage and research:
+        return triage, research
+
+    models = available_models(cfg, backend)
     if not models and not triage:
-        raise RuntimeError("no model found at local /v1/models")
+        raise RuntimeError(
+            "no local LLM model configured; set triage_model/research_model"
+        )
     if not triage:
         triage = min(models, key=lambda x: (_model_size(x) or 10000, x))
     if not research:

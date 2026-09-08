@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TechnoScout v0.3: read-only Technocore scout powered by a local LLM."""
+"""TechnoScout v0.4: read-only Technocore scout powered by a local LLM."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from technoscout.common import (
     technocore_json,
     utc_now,
 )
+from technoscout.llm_backend import create_llm_backend
 from technoscout.db import (
     agent_context,
     agent_relationship,
@@ -89,7 +90,13 @@ def load_config(path: str) -> dict[str, Any]:
 
     defaults = {
         "base_url": "https://technocore.chat",
+        "llm_backend": "managed_mlx",
         "llm_base_url": "http://127.0.0.1:8080/v1",
+        "mlx_worker_python": "",
+        "mlx_worker_log": "logs/mlx-worker.log",
+        "mlx_worker_start_timeout_seconds": 180,
+        "mlx_worker_first_request_extra_seconds": 60,
+        "mlx_worker_kill_grace_seconds": 2,
         "database": "data/technoscout.db",
         "long_poll_seconds": 10,
         "catalog_refresh_seconds": 900,
@@ -103,6 +110,8 @@ def load_config(path: str) -> dict[str, Any]:
         "loop_idle_seconds": 2,
         "http_timeout_seconds": 25,
         "llm_timeout_seconds": 90,
+        "triage_timeout_seconds": 90,
+        "watch_timeout_seconds": 60,
         "max_response_bytes": 5000000,
         "seed_rooms": [],
         "project_context": "",
@@ -143,12 +152,18 @@ def load_config(path: str) -> dict[str, Any]:
     if urllib.parse.urlsplit(cfg["base_url"]).scheme != "https":
         raise ValueError("base_url must use HTTPS")
 
-    llm = urllib.parse.urlsplit(str(cfg["llm_base_url"]))
-    if llm.scheme not in {"http", "https"}:
-        raise ValueError("llm_base_url must use http or https")
-    if not cfg["allow_remote_llm"] and (llm.hostname or "") not in {"127.0.0.1", "localhost", "::1"}:
-        raise ValueError("llm_base_url must be loopback unless allow_remote_llm=true")
+    cfg["llm_backend"] = str(cfg.get("llm_backend", "managed_mlx")).strip().lower()
     cfg["llm_base_url"] = str(cfg["llm_base_url"]).rstrip("/")
+    if cfg["llm_backend"] in {"http", "openai_http"}:
+        llm = urllib.parse.urlsplit(str(cfg["llm_base_url"]))
+        if llm.scheme not in {"http", "https"}:
+            raise ValueError("llm_base_url must use http or https")
+        if not cfg["allow_remote_llm"] and (llm.hostname or "") not in {
+            "127.0.0.1", "localhost", "::1"
+        }:
+            raise ValueError(
+                "llm_base_url must be loopback unless allow_remote_llm=true"
+            )
 
     # v0.2 fast-watch clamps older local configs without requiring a reset.
     if bool(cfg.get("watch_fast_mode", True)):
@@ -252,7 +267,14 @@ class TechnoScout:
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
         self.db = connect(database_path(cfg))
-        self.triage_model, self.research_model = resolve_models(cfg)
+        self.llm = create_llm_backend(cfg)
+        self.triage_model, self.research_model = resolve_models(cfg, self.llm)
+
+    def close(self) -> None:
+        try:
+            self.llm.close()
+        finally:
+            self.db.close()
 
     def _remember_encounters(self, messages: list[dict[str, Any]], room: str, seen_at: str) -> list[str]:
         if not bool(self.cfg.get("agent_memory", True)):
@@ -382,7 +404,16 @@ class TechnoScout:
                     f"[triage {index}/{total}] room={room} input={size} chars model={self.triage_model} start",
                     flush=True,
                 )
-                result = local_llm_json(self.cfg, self.triage_model, TRIAGE_PROMPT, payload)
+                result = local_llm_json(
+                    self.cfg,
+                    self.llm,
+                    self.triage_model,
+                    TRIAGE_PROMPT,
+                    payload,
+                    timeout_seconds=float(
+                        self.cfg.get("triage_timeout_seconds", 90)
+                    ),
+                )
                 scores = {k: clamp_score(result.get(k)) for k in ("relevance", "novelty", "technical", "people")}
                 action = str(result.get("action", "IGNORE")).upper()
                 allowed_seqs = {seq_of(item) for item in messages}
@@ -520,10 +551,14 @@ class TechnoScout:
                 )
                 result = local_llm_json(
                     self.cfg,
+                    self.llm,
                     self.research_model,
                     RESEARCH_PROMPT,
                     payload,
                     max_tokens=int(self.cfg.get("watch_llm_max_tokens", 160)),
+                    timeout_seconds=float(
+                        self.cfg.get("watch_timeout_seconds", 60)
+                    ),
                 )
                 allowed = {seq_of(item) for item in messages}
                 evidence = [x for x in result.get("evidence_seqs", []) if isinstance(x, int) and x in allowed]
@@ -606,6 +641,7 @@ class TechnoScout:
                                     }
                                     draft_result = local_llm_json(
                                         self.cfg,
+                                        self.llm,
                                         self.research_model,
                                         DRAFT_PROMPT,
                                         draft_payload,
@@ -685,11 +721,12 @@ class TechnoScout:
             "SELECT COUNT(*) n FROM agents WHERE useful_signal_count > 0"
         ).fetchone()["n"]
         print(
-            f"TechnoScout v0.3 | rooms={total} selected={selected} pending={pending} "
+            f"TechnoScout v0.4 | rooms={total} selected={selected} pending={pending} "
             f"signals={signals} drafts={drafts} agents={agents} useful_agents={useful_agents}"
         )
         print(f"triage_model={self.triage_model}")
         print(f"research_model={self.research_model}")
+        print(f"llm_backend={self.llm.describe()}")
         print(
             "watch="
             f"{self.cfg['watch_rooms_per_cycle']} rooms/cycle, "
@@ -747,7 +784,7 @@ def main() -> None:
     cfg = load_config(args.config)
     scout = TechnoScout(cfg)
     print(
-        f"TechnoScout v0.3 READ ONLY | LLM={cfg['llm_base_url']} | DB={database_path(cfg)}",
+        f"TechnoScout v0.4 READ ONLY | LLM={cfg['llm_backend']} | DB={database_path(cfg)}",
         flush=True,
     )
     try:
@@ -781,7 +818,7 @@ def main() -> None:
                 continue
             time.sleep(float(cfg["loop_idle_seconds"]))
     finally:
-        scout.db.close()
+        scout.close()
 
 
 if __name__ == "__main__":
