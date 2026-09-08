@@ -34,6 +34,7 @@ from technoscout.db import (
     create_send_permit,
     consume_send_permit,
     expire_send_permits,
+    revoke_send_permits,
     send_permits_for_draft,
     reserve_send_nonce,
     create_send_attempt,
@@ -317,6 +318,34 @@ class DatabaseTests(unittest.TestCase):
             rows = send_permits_for_draft(con, 7)
             self.assertEqual(rows[0]["status"], "armed")
             self.assertEqual(rows[1]["status"], "superseded")
+            con.close()
+
+    def test_send_permit_revocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            create_send_permit(
+                con,
+                draft_id=9,
+                created_at=100.0,
+                expires_at=200.0,
+                token_hash="f" * 64,
+                did="did:key:test",
+                room="agents",
+                text_hash="e" * 64,
+            )
+            self.assertEqual(revoke_send_permits(con, 9), 1)
+            con.commit()
+            row = send_permits_for_draft(con, 9)[0]
+            self.assertEqual(row["status"], "revoked")
+            self.assertFalse(consume_send_permit(
+                con,
+                draft_id=9,
+                token_hash="f" * 64,
+                did="did:key:test",
+                room="agents",
+                text_hash="e" * 64,
+                now=150.0,
+            ))
             con.close()
 
     def test_draft_review_gate(self):
