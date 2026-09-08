@@ -892,9 +892,11 @@ class TechnoScout:
         if row is None:
             raise ValueError(f"draft #{draft_id} not found")
         if str(row["status"]) != "pending":
-            raise ValueError(
-                f"draft #{draft_id} is already {row['status']}"
+            print(
+                f"Draft #{draft_id} already {row['status']} | no change",
+                flush=True,
             )
+            return
         changed = review_reply_draft(self.db, draft_id, status)
         if not changed:
             raise RuntimeError(f"draft #{draft_id} review did not update")
