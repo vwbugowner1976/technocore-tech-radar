@@ -82,6 +82,21 @@ CREATE TABLE IF NOT EXISTS agent_topics (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_topics_agent
     ON agent_topics(agent_id, hit_count DESC);
+
+CREATE TABLE IF NOT EXISTS reply_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    room TEXT NOT NULL,
+    through_seq INTEGER NOT NULL,
+    target_agent TEXT NOT NULL DEFAULT '',
+    relationship_score INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL,
+    draft_text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    UNIQUE(room, through_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_reply_drafts_status
+    ON reply_drafts(status, created_at DESC);
 """
 
 
@@ -268,3 +283,94 @@ def agent_context(
             }
         )
     return result
+
+
+
+def relationship_score(
+    encounter_count: int,
+    useful_signal_count: int,
+    followup_count: int,
+) -> int:
+    score = (
+        min(20, max(0, int(encounter_count)) * 2)
+        + min(50, max(0, int(useful_signal_count)) * 20)
+        + min(30, max(0, int(followup_count)) * 15)
+    )
+    return max(0, min(100, score))
+
+
+def agent_relationship(con: sqlite3.Connection, agent_id: str) -> dict[str, Any]:
+    row = con.execute(
+        """
+        SELECT agent_id, encounter_count, useful_signal_count, followup_count,
+               last_room, last_summary
+        FROM agents WHERE agent_id=?
+        """,
+        (agent_id[:240],),
+    ).fetchone()
+    if not row:
+        return {
+            "agent_id": agent_id[:240],
+            "score": 0,
+            "encounters": 0,
+            "signals": 0,
+            "followups": 0,
+            "last_room": "",
+            "last_summary": "",
+        }
+    return {
+        "agent_id": str(row["agent_id"]),
+        "score": relationship_score(
+            row["encounter_count"],
+            row["useful_signal_count"],
+            row["followup_count"],
+        ),
+        "encounters": int(row["encounter_count"]),
+        "signals": int(row["useful_signal_count"]),
+        "followups": int(row["followup_count"]),
+        "last_room": str(row["last_room"]),
+        "last_summary": str(row["last_summary"]),
+    }
+
+
+def create_reply_draft(
+    con: sqlite3.Connection,
+    created_at: str,
+    room: str,
+    through_seq: int,
+    target_agent: str,
+    relationship: int,
+    reason: str,
+    draft_text: str,
+) -> bool:
+    cur = con.execute(
+        """
+        INSERT OR IGNORE INTO reply_drafts(
+          created_at,room,through_seq,target_agent,relationship_score,reason,draft_text,status
+        ) VALUES(?,?,?,?,?,?,?,'pending')
+        """,
+        (
+            created_at,
+            room[:80],
+            int(through_seq),
+            target_agent[:240],
+            max(0, min(100, int(relationship))),
+            reason[:1000],
+            draft_text[:2000],
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def pending_reply_drafts(con: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT id, created_at, room, through_seq, target_agent,
+               relationship_score, reason, draft_text, status
+        FROM reply_drafts
+        WHERE status='pending'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
