@@ -149,3 +149,51 @@ Agent Memory:
     python3 technoscout.py --agents
 
 Old local configs remain valid. With `watch_fast_mode=true` (the default), v0.2 clamps an older 12-room / 6500-character watch configuration down to the v0.2 fast-watch caps automatically.
+
+
+## TechnoScout v0.3 — Relationship Memory + Draft Reply
+
+v0.3 remains read-only with respect to Technocore. It does not contain a Technocore POST/sign/send path.
+
+New behavior:
+
+- triage uses an evidence gate: project_context is an interest filter, never evidence
+- high-scoring rooms must point to the actual room topic or valid message sequence numbers
+- Agent Memory is converted into a 0-100 relationship score
+- FOLLOW_UP_CANDIDATE signals can create short local reply drafts
+- at most 2 drafts are generated per cycle by default
+- draft generation is limited to 30 seconds and cannot block signal/cursor persistence
+- drafts are stored only in SQLite with status=pending
+
+Relationship score currently weights repeated encounters, useful signals, and follow-up candidates. It is deliberately simple and inspectable.
+
+### Upgrade from v0.2
+
+    cd ~/technocore-tech-radar
+    git fetch origin
+    git switch technoscout-v0.3
+    git pull
+
+Existing data/technoscout.db is reused. The reply_drafts table is added automatically.
+
+Run tests:
+
+    python3 -m unittest tests.test_technoscout
+
+One safe cycle:
+
+    python3 technoscout.py --once
+
+Status:
+
+    python3 technoscout.py --status
+
+Relationship Memory:
+
+    python3 technoscout.py --agents
+
+Pending reply drafts:
+
+    python3 technoscout.py --drafts
+
+The draft list explicitly prints NOT SENT. No draft is posted, signed, or transmitted by v0.3.
