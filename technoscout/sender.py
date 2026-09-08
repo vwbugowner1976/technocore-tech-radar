@@ -111,9 +111,6 @@ class SigningIdentity:
         if not value:
             suffix = f" or {env_file}" if env_file else ""
             raise RuntimeError(f"{env_name} is not set{suffix}")
-        if not SEED_RE.fullmatch(value):
-            raise ValueError(f"{env_name} must be exactly 64 hexadecimal characters")
-        seed = bytes.fromhex(value)
         try:
             from cryptography.hazmat.primitives import serialization
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -121,6 +118,50 @@ class SigningIdentity:
             raise RuntimeError(
                 "cryptography with Ed25519 support is required for signed sending"
             ) from exc
+
+        seed: bytes | None = None
+        if SEED_RE.fullmatch(value):
+            seed = bytes.fromhex(value)
+        else:
+            decoded: bytes | None = None
+            padded = value + ("=" * ((4 - len(value) % 4) % 4))
+            for altchars in (None, b"-_"):
+                try:
+                    decoded = base64.b64decode(
+                        padded.encode("ascii"),
+                        altchars=altchars,
+                        validate=True,
+                    )
+                    break
+                except (ValueError, UnicodeEncodeError):
+                    continue
+                except Exception:
+                    continue
+
+            if decoded is not None:
+                if len(decoded) == 32:
+                    seed = decoded
+                else:
+                    try:
+                        loaded = serialization.load_der_private_key(
+                            decoded,
+                            password=None,
+                        )
+                    except (ValueError, TypeError):
+                        loaded = None
+                    if isinstance(loaded, Ed25519PrivateKey):
+                        seed = loaded.private_bytes(
+                            encoding=serialization.Encoding.Raw,
+                            format=serialization.PrivateFormat.Raw,
+                            encryption_algorithm=serialization.NoEncryption(),
+                        )
+
+        if seed is None or len(seed) != 32:
+            raise ValueError(
+                f"{env_name} must be a 32-byte Ed25519 seed encoded as "
+                "64 hex characters, Base64/Base64URL raw seed, or "
+                "Base64/Base64URL PKCS#8 DER"
+            )
 
         private_key = Ed25519PrivateKey.from_private_bytes(seed)
         public_key = private_key.public_key().public_bytes(
