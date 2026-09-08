@@ -14,7 +14,7 @@ from technoscout.common import (
     safe_room,
 )
 from technoscout.llm_backend import ManagedMLXBackend
-from technoscout.sender import SigningIdentity, sweep_text
+from technoscout.sender import SigningIdentity, diagnose_signing_material, sweep_text
 from technoscout.db import (
     agent_context,
     agent_relationship,
@@ -274,6 +274,18 @@ class SenderCryptoTests(unittest.TestCase):
             finally:
                 if old is not None:
                     os.environ["SIGN_SEED"] = old
+
+    def test_diagnose_base64_legacy_shape(self):
+        raw = bytes(range(48))
+        encoded = base64.b64encode(raw).decode("ascii")
+        self.assertEqual(len(encoded), 64)
+        result = diagnose_signing_material(encoded)
+        self.assertEqual(result["chars"], 64)
+        self.assertTrue(result["base64_standard"])
+        self.assertIn(48, result["decoded_lengths"])
+        self.assertFalse(result["pkcs8_ed25519"])
+        self.assertIn("base64_standard_first32", result["candidate_dids"])
+        self.assertIn("base64_standard_last32", result["candidate_dids"])
 
     def test_base64_pkcs8_seed_round_trip(self):
         try:
