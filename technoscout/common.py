@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for TechnoScout v0.1.3."""
+"""Shared helpers for TechnoScout v0.1.4."""
 
 from __future__ import annotations
 
@@ -135,25 +135,46 @@ def _response_shape(text: str) -> str:
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.I)
+    raw = text.strip()
     decoder = json.JSONDecoder()
-    for candidate in [cleaned] + [x.strip() for x in reversed(cleaned.splitlines()) if x.strip()]:
+
+    candidates = [raw]
+
+    # Local models often return valid JSON inside a fenced block and then append
+    # special tokens or prose. Parse the fenced payload locally before retrying the LLM.
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", raw, flags=re.I | re.S):
+        block = match.group(1).strip()
+        if block:
+            candidates.append(block)
+
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I)
+    if cleaned != raw:
+        candidates.append(cleaned)
+
+    candidates.extend(x.strip() for x in reversed(raw.splitlines()) if x.strip())
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
         try:
             value, _ = decoder.raw_decode(candidate)
             if isinstance(value, dict):
                 return value
         except json.JSONDecodeError:
             pass
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            value = json.loads(cleaned[start:end + 1])
-            if isinstance(value, dict):
-                return value
-        except json.JSONDecodeError:
-            pass
-    raise LLMJsonError(len(text), _response_shape(text), repaired=False)
 
+        start, end = candidate.find("{"), candidate.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                value = json.loads(candidate[start:end + 1])
+                if isinstance(value, dict):
+                    return value
+            except json.JSONDecodeError:
+                pass
+
+    raise LLMJsonError(len(text), _response_shape(text), repaired=False)
 
 def _chat_content(
     cfg: dict[str, Any],
