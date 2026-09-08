@@ -804,8 +804,9 @@ class TechnoScout:
         print(f"research_model={self.research_model}", flush=True)
         print(f"llm_backend={self.llm.describe()}", flush=True)
         print(
-            f"sending_enabled={bool(self.cfg.get('sending_enabled', False))} "
-            "(explicit --send-approved only)",
+            f"send_permit_required={bool(self.cfg.get('send_permit_required', True))} "
+            f"ttl={int(self.cfg.get('send_permit_ttl_seconds', 600))}s "
+            "(approve -> arm -> one explicit send)",
             flush=True,
         )
         print(
