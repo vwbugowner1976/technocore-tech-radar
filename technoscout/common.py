@@ -47,7 +47,7 @@ def compact_messages(messages: list[dict[str, Any]], maximum: int) -> list[dict[
             "seq": seq_of(item),
             "from": str(item.get("from", item.get("did", "")))[:200],
             "ts": item.get("ts", item.get("timestamp")),
-            "text": str(item.get("text", item.get("message", "")))[:4096],
+            "text": str(item.get("text", item.get("message", "")))[:1200],
         })
     return result
 
@@ -135,6 +135,7 @@ def local_llm_json(
     payload = {
         "model": model,
         "temperature": 0.1,
+        "max_tokens": int(cfg.get("llm_max_tokens", 256)),
         "messages": [
             {"role": "system", "content": system_prompt},
             {
