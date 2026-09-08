@@ -364,7 +364,7 @@ class ApprovedDraftSender:
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "technoscout-sender/0.6",
+                "User-Agent": "technoscout-sender/0.7",
             },
             method="POST",
         )
