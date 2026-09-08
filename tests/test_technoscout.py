@@ -259,6 +259,22 @@ class DatabaseTests(unittest.TestCase):
 
 
 class SenderCryptoTests(unittest.TestCase):
+    def test_signing_seed_private_env_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text("SIGN_SEED=" + ("01" * 32) + "\n", encoding="utf-8")
+            env_file.chmod(0o600)
+            old = os.environ.pop("SIGN_SEED", None)
+            try:
+                identity = SigningIdentity.from_env("SIGN_SEED", str(env_file))
+                self.assertTrue(identity.did.startswith("did:key:z6Mk"))
+                env_file.chmod(0o644)
+                with self.assertRaises(RuntimeError):
+                    SigningIdentity.from_env("SIGN_SEED", str(env_file))
+            finally:
+                if old is not None:
+                    os.environ["SIGN_SEED"] = old
+
     def test_signing_identity_round_trip(self):
         try:
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
