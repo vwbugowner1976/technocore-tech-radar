@@ -155,7 +155,9 @@ print(json.dumps({"type": "ready", "model": args.model}), flush=True)
 for line in sys.stdin:
     req = json.loads(line)
     if req.get("op") == "chat":
-        time.sleep(5)
+        content = req.get("messages", [{}])[-1].get("content", "")
+        if content == "hang":
+            time.sleep(5)
         print(json.dumps({
             "type": "result",
             "id": req["id"],
@@ -188,6 +190,16 @@ for line in sys.stdin:
                     )
                 self.assertIsNone(backend.proc)
                 self.assertLess(time.monotonic() - started, 3.0)
+                result = backend.chat(
+                    "fake-model",
+                    [{"role": "user", "content": "recover"}],
+                    max_tokens=8,
+                    temperature=0.0,
+                    timeout_seconds=1.0,
+                )
+                self.assertEqual(result, "{}")
+                self.assertIsNotNone(backend.proc)
+                self.assertGreaterEqual(backend.restart_count, 2)
             finally:
                 backend.close()
 
