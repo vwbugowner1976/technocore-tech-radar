@@ -842,6 +842,19 @@ class TechnoScout:
                 f"OR --reject-draft {row['id']}"
             )
 
+    def show_draft(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        print(
+            f"Draft #{row['id']} | status={row['status']} | NOT SENT\n"
+            f"room={row['room']} through_seq={row['through_seq']}\n"
+            f"target={row['target_agent']} relationship={row['relationship_score']}\n"
+            f"reason: {row['reason']}\n"
+            f"draft: {row['draft_text']}",
+            flush=True,
+        )
+
     def review_draft(self, draft_id: int, status: str) -> None:
         row = get_reply_draft(self.db, draft_id)
         if row is None:
@@ -871,6 +884,7 @@ def main() -> None:
     modes.add_argument("--status", action="store_true")
     modes.add_argument("--agents", action="store_true")
     modes.add_argument("--drafts", action="store_true")
+    modes.add_argument("--show-draft", type=int, metavar="ID")
     modes.add_argument("--retriage-selected", action="store_true")
     modes.add_argument("--approve-draft", type=int, metavar="ID")
     modes.add_argument("--reject-draft", type=int, metavar="ID")
@@ -891,6 +905,9 @@ def main() -> None:
             return
         if args.drafts:
             scout.drafts_status()
+            return
+        if args.show_draft is not None:
+            scout.show_draft(args.show_draft)
             return
         if args.retriage_selected:
             scout.retriage_selected()
