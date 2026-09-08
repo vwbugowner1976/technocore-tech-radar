@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for TechnoScout v0.2."""
+"""Shared helpers for TechnoScout v0.3."""
 
 from __future__ import annotations
 
@@ -202,6 +202,7 @@ def local_llm_json(
     system_prompt: str,
     untrusted_data: Any,
     max_tokens: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     payload = {
         "model": model,
@@ -217,7 +218,7 @@ def local_llm_json(
             },
         ],
     }
-    content = _chat_content(cfg, payload)
+    content = _chat_content(cfg, payload, timeout_seconds=timeout_seconds)
     try:
         return parse_json_object(content)
     except LLMJsonError as first:
