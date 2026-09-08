@@ -22,7 +22,12 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(value["relevance"], 90)
 
     def test_json_parser_fenced_with_trailing_text(self):
-        value = parse_json_object(\'Here is the result:\\n```json\\n{"relevance": 88, "action": "SAVE"}\\n```\\n<|im_end|>\')
+        sample = """Here is the result:
+```json
+{"relevance": 88, "action": "SAVE"}
+```
+<|im_end|>"""
+        value = parse_json_object(sample)
         self.assertEqual(value["relevance"], 88)
         self.assertEqual(value["action"], "SAVE")
 
