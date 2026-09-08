@@ -428,7 +428,7 @@ def reply_draft_counts(con: sqlite3.Connection) -> dict[str, int]:
     rows = con.execute(
         "SELECT status, COUNT(*) n FROM reply_drafts GROUP BY status"
     ).fetchall()
-    result = {"pending": 0, "approved": 0, "rejected": 0}
+    result = {"pending": 0, "approved": 0, "rejected": 0, "sent": 0, "send_uncertain": 0, "send_blocked": 0}
     for row in rows:
         result[str(row["status"])] = int(row["n"])
     return result
