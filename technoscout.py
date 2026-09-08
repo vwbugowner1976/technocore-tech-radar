@@ -28,6 +28,7 @@ from technoscout.common import (
     utc_now,
 )
 from technoscout.db import (
+    agent_context,
     connect,
     get_meta,
     record_agent_encounter,
@@ -205,7 +206,7 @@ TRIVIAL_WATCH_TEXTS = {
 
 
 def agent_id_of(item: dict[str, Any]) -> str:
-    value = item.get("from", item.get("did", ""))
+    value = item.get("did") or item.get("from", "")
     if isinstance(value, dict):
         value = value.get("did", value.get("id", value.get("name", "")))
     agent_id = str(value or "").strip()
@@ -467,6 +468,9 @@ class TechnoScout:
                     ),
                     int(self.cfg.get("watch_input_char_budget", 3500)),
                 )
+                known_agents = agent_context(self.db, batch_agents, limit=4)
+                if known_agents:
+                    payload["known_agents"] = known_agents
                 size = len(json.dumps(payload, ensure_ascii=False))
                 print(
                     f"[watch {index}/{total}] room={room} input={size} chars model={self.research_model} start",
