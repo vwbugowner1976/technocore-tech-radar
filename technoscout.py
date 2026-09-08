@@ -110,6 +110,8 @@ def load_config(path: str) -> dict[str, Any]:
         "loop_idle_seconds": 2,
         "http_timeout_seconds": 25,
         "llm_timeout_seconds": 90,
+        "triage_timeout_seconds": 90,
+        "watch_timeout_seconds": 60,
         "max_response_bytes": 5000000,
         "seed_rooms": [],
         "project_context": "",
@@ -408,6 +410,9 @@ class TechnoScout:
                     self.triage_model,
                     TRIAGE_PROMPT,
                     payload,
+                    timeout_seconds=float(
+                        self.cfg.get("triage_timeout_seconds", 90)
+                    ),
                 )
                 scores = {k: clamp_score(result.get(k)) for k in ("relevance", "novelty", "technical", "people")}
                 action = str(result.get("action", "IGNORE")).upper()
@@ -551,6 +556,9 @@ class TechnoScout:
                     RESEARCH_PROMPT,
                     payload,
                     max_tokens=int(self.cfg.get("watch_llm_max_tokens", 160)),
+                    timeout_seconds=float(
+                        self.cfg.get("watch_timeout_seconds", 60)
+                    ),
                 )
                 allowed = {seq_of(item) for item in messages}
                 evidence = [x for x in result.get("evidence_seqs", []) if isinstance(x, int) and x in allowed]
