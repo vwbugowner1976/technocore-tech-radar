@@ -4,6 +4,7 @@ from pathlib import Path
 
 from technoscout.common import clamp_score, event_room, parse_json_object, safe_room
 from technoscout.db import (
+    agent_context,
     connect,
     get_meta,
     record_agent_encounter,
@@ -73,6 +74,9 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["useful_signal_count"], 1)
             self.assertEqual(rows[0]["followup_count"], 1)
             self.assertIn("zmk", rows[0]["topics"])
+            context = agent_context(con, ["did:key:test-agent"])
+            self.assertEqual(context[0]["signals"], 1)
+            self.assertIn("nrf52840", context[0]["topics"])
             con.close()
 
 
