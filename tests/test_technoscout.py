@@ -21,6 +21,11 @@ class CommonTests(unittest.TestCase):
         value = parse_json_object('{"relevance": 90}')
         self.assertEqual(value["relevance"], 90)
 
+    def test_json_parser_fenced_with_trailing_text(self):
+        value = parse_json_object(\'Here is the result:\\n```json\\n{"relevance": 88, "action": "SAVE"}\\n```\\n<|im_end|>\')
+        self.assertEqual(value["relevance"], 88)
+        self.assertEqual(value["action"], "SAVE")
+
     def test_score_clamp(self):
         self.assertEqual(clamp_score(101), 100)
         self.assertEqual(clamp_score(-2), 0)
