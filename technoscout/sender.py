@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -88,6 +89,14 @@ def diagnose_signing_material(value: str) -> dict[str, Any]:
     if SEED_RE.fullmatch(value):
         try:
             result["candidate_dids"]["hex_raw32"] = _did_from_seed(bytes.fromhex(value))
+        except Exception:
+            pass
+    else:
+        # Compatibility with the repository's original sign.py:
+        # every non-hex SIGN_SEED was treated as a passphrase and SHA-256'd.
+        try:
+            legacy_seed = hashlib.sha256(value.encode("utf-8")).digest()
+            result["candidate_dids"]["legacy_sha256_text"] = _did_from_seed(legacy_seed)
         except Exception:
             pass
 
@@ -243,11 +252,15 @@ class SigningIdentity:
                             encryption_algorithm=serialization.NoEncryption(),
                         )
 
-        if seed is None or len(seed) != 32:
+        if seed is None:
+            # Backward compatibility with the original repository sign.py.
+            # It accepts any non-hex SIGN_SEED as a passphrase and derives
+            # the Ed25519 seed as SHA-256(UTF-8 text).
+            seed = hashlib.sha256(value.encode("utf-8")).digest()
+
+        if len(seed) != 32:
             raise ValueError(
-                f"{env_name} must be a 32-byte Ed25519 seed encoded as "
-                "64 hex characters, Base64/Base64URL raw seed, or "
-                "Base64/Base64URL PKCS#8 DER"
+                f"{env_name} could not be converted to a 32-byte Ed25519 seed"
             )
 
         private_key = Ed25519PrivateKey.from_private_bytes(seed)
