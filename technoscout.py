@@ -435,13 +435,14 @@ class TechnoScout:
                     continue
 
                 new_last = max([last_seq] + [seq_of(item) for item in messages])
-                batch_agents = self._remember_encounters(messages, room, now)
+                batch_agents = sorted({agent_id_of(item) for item in messages if agent_id_of(item)})
                 analysis_messages = (
                     nontrivial_messages(messages)
                     if bool(self.cfg.get("watch_skip_trivial", True))
                     else messages
                 )
                 if not analysis_messages:
+                    self._remember_encounters(messages, room, now)
                     self.db.execute(
                         "UPDATE rooms SET last_seq=?, watched_at=?, last_seen=? WHERE room=?",
                         (new_last, now, now, room),
@@ -487,6 +488,7 @@ class TechnoScout:
                 action = str(result.get("action", "IGNORE")).upper()
                 if action not in {"IGNORE", "SAVE", "FOLLOW_UP_CANDIDATE"}:
                     action = "IGNORE"
+                self._remember_encounters(messages, room, now)
                 if result.get("meaningful") is True:
                     self.db.execute(
                         """
