@@ -58,6 +58,8 @@
   "draft_status_limit": 12,
   "retriage_selected_limit": 100,
   "sending_enabled": false,
+  "send_permit_required": true,
+  "send_permit_ttl_seconds": 600,
   "signing_seed_env": "SIGN_SEED",
   "signing_env_file": ".env",
   "sender_timeout_seconds": 20,
