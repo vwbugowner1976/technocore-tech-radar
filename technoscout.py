@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TechnoScout v0.4: read-only Technocore scout powered by a local LLM."""
+"""TechnoScout v0.5: read-only Technocore scout powered by a local LLM."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from technoscout.common import (
     compact_messages,
     event_room,
     local_llm_json,
+    normalize_evidence_source,
     resolve_models,
     room_messages,
     safe_room,
@@ -34,9 +35,12 @@ from technoscout.db import (
     connect,
     create_reply_draft,
     get_meta,
+    get_reply_draft,
     record_agent_encounter,
     record_agent_signal,
     pending_reply_drafts,
+    reply_draft_counts,
+    review_reply_draft,
     set_meta,
     top_agents,
 )
@@ -138,6 +142,7 @@ def load_config(path: str) -> dict[str, Any]:
         "draft_timeout_seconds": 30,
         "draft_min_relationship_score": 0,
         "draft_status_limit": 12,
+        "retriage_selected_limit": 100,
         "prefilter_keywords": [
             "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
             "embedded", "firmware", "mcu", "usb", "agent", "llm", "mcp", "tooling", "protocol",
@@ -379,8 +384,13 @@ class TechnoScout:
             )
         return chosen
 
-    def triage(self) -> None:
-        rows = self._candidate_rows()
+    def _triage_rows(
+        self,
+        rows: list[Any],
+        label: str,
+        preserve_cursor: bool = False,
+        remember_selected: bool = True,
+    ) -> None:
         total = len(rows)
         for index, row in enumerate(rows, start=1):
             room = row["room"]
@@ -401,7 +411,8 @@ class TechnoScout:
                 )
                 size = len(json.dumps(payload, ensure_ascii=False))
                 print(
-                    f"[triage {index}/{total}] room={room} input={size} chars model={self.triage_model} start",
+                    f"[{label} {index}/{total}] room={room} input={size} chars "
+                    f"model={self.triage_model} start",
                     flush=True,
                 )
                 result = local_llm_json(
@@ -414,67 +425,118 @@ class TechnoScout:
                         self.cfg.get("triage_timeout_seconds", 90)
                     ),
                 )
-                scores = {k: clamp_score(result.get(k)) for k in ("relevance", "novelty", "technical", "people")}
+                scores = {
+                    key: clamp_score(result.get(key))
+                    for key in ("relevance", "novelty", "technical", "people")
+                }
                 action = str(result.get("action", "IGNORE")).upper()
-                allowed_seqs = {seq_of(item) for item in messages}
-                evidence_seqs = [
-                    x for x in result.get("evidence_seqs", [])
-                    if isinstance(x, int) and x in allowed_seqs
-                ]
-                evidence_source = str(result.get("evidence_source", "none")).lower()
-                has_evidence = (
-                    (evidence_source == "messages" and bool(evidence_seqs))
-                    or (evidence_source == "topic" and bool(str(row["topic"]).strip()))
-                )
                 if action not in {"IGNORE", "SAVE", "DEEP_READ"}:
                     action = "IGNORE"
+
+                allowed_seqs = {seq_of(item) for item in messages}
+                evidence_seqs = [
+                    value
+                    for value in result.get("evidence_seqs", [])
+                    if isinstance(value, int) and value in allowed_seqs
+                ]
+                evidence_source = normalize_evidence_source(
+                    result.get("evidence_source", "none")
+                )
+                has_evidence = (
+                    (evidence_source == "messages" and bool(evidence_seqs))
+                    or (
+                        evidence_source == "topic"
+                        and bool(str(row["topic"]).strip())
+                    )
+                )
+
                 state = "selected" if (
                     action in {"SAVE", "DEEP_READ"}
                     or scores["relevance"] >= int(self.cfg["deep_read_threshold"])
                 ) else "ignored"
                 reason = str(result.get("reason", ""))
+
                 if state == "selected" and not has_evidence:
                     state = "ignored"
                     action = "IGNORE"
                     scores["relevance"] = min(scores["relevance"], 49)
                     scores["technical"] = min(scores["technical"], 49)
-                    reason = "Evidence gate: no supporting room topic/message evidence. " + reason
+                    reason = (
+                        "Evidence gate: no supporting room topic/message evidence. "
+                        + reason
+                    )
+
                 baseline = max((seq_of(item) for item in messages), default=0)
+                cursor = int(row["last_seq"] or 0) if preserve_cursor else baseline
                 self.db.execute(
                     """
-                    UPDATE rooms SET state=?, relevance=?, novelty=?, technical=?, people=?,
-                    reason=?, triaged_at=?, last_seq=? WHERE room=?
+                    UPDATE rooms SET state=?, relevance=?, novelty=?, technical=?,
+                    people=?, reason=?, triaged_at=?, last_seq=? WHERE room=?
                     """,
                     (
-                        state, scores["relevance"], scores["novelty"], scores["technical"], scores["people"],
-                        reason[:2000], utc_now(), baseline, room,
+                        state,
+                        scores["relevance"],
+                        scores["novelty"],
+                        scores["technical"],
+                        scores["people"],
+                        reason[:2000],
+                        utc_now(),
+                        cursor,
+                        room,
                     ),
                 )
-                if state == "selected":
+                if state == "selected" and remember_selected:
                     self._remember_encounters(messages, room, utc_now())
                 self.db.commit()
                 print(
-                    f"[triage {index}/{total}] OK {elapsed(started)} {room}: {state} "
-                    f"rel={scores['relevance']} tech={scores['technical']} evidence={evidence_source} "
-                    f"- {reason[:120]}",
+                    f"[{label} {index}/{total}] OK {elapsed(started)} {room}: "
+                    f"{state} rel={scores['relevance']} tech={scores['technical']} "
+                    f"evidence={evidence_source} - {reason[:120]}",
                     flush=True,
                 )
             except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
                 print(
-                    f"[triage {index}/{total}] TIMEOUT/NETWORK {elapsed(started)} room={room}: "
-                    f"{type(exc).__name__}: {exc} -- skipped",
+                    f"[{label} {index}/{total}] TIMEOUT/NETWORK "
+                    f"{elapsed(started)} room={room}: "
+                    f"{type(exc).__name__}: {exc} -- unchanged",
                     file=sys.stderr,
                     flush=True,
                 )
                 continue
             except Exception as exc:
                 print(
-                    f"[triage {index}/{total}] ERROR {elapsed(started)} room={room}: "
-                    f"{type(exc).__name__}: {exc} -- skipped",
+                    f"[{label} {index}/{total}] ERROR {elapsed(started)} "
+                    f"room={room}: {type(exc).__name__}: {exc} -- unchanged",
                     file=sys.stderr,
                     flush=True,
                 )
                 continue
+
+    def triage(self) -> None:
+        self._triage_rows(self._candidate_rows(), "triage")
+
+    def retriage_selected(self) -> None:
+        limit = max(1, int(self.cfg.get("retriage_selected_limit", 100)))
+        rows = self.db.execute(
+            """
+            SELECT * FROM rooms
+            WHERE state='selected'
+            ORDER BY COALESCE(relevance,0) DESC, last_seen DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        print(
+            f"[retriage] selected={len(rows)} limit={limit} "
+            "cursor=preserved agent-counts=preserved",
+            flush=True,
+        )
+        self._triage_rows(
+            rows,
+            "retriage",
+            preserve_cursor=True,
+            remember_selected=False,
+        )
 
     def watch(self) -> None:
         drafts_created = 0
@@ -713,16 +775,16 @@ class TechnoScout:
         selected = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='selected'").fetchone()["n"]
         pending = self.db.execute("SELECT COUNT(*) n FROM rooms WHERE state='pending'").fetchone()["n"]
         signals = self.db.execute("SELECT COUNT(*) n FROM observations").fetchone()["n"]
-        drafts = self.db.execute(
-            "SELECT COUNT(*) n FROM reply_drafts WHERE status='pending'"
-        ).fetchone()["n"]
+        draft_counts = reply_draft_counts(self.db)
         agents = self.db.execute("SELECT COUNT(*) n FROM agents").fetchone()["n"]
         useful_agents = self.db.execute(
             "SELECT COUNT(*) n FROM agents WHERE useful_signal_count > 0"
         ).fetchone()["n"]
         print(
-            f"TechnoScout v0.4 | rooms={total} selected={selected} pending={pending} "
-            f"signals={signals} drafts={drafts} agents={agents} useful_agents={useful_agents}"
+            f"TechnoScout v0.5 | rooms={total} selected={selected} pending={pending} "
+            f"signals={signals} drafts=p{draft_counts.get('pending',0)}/"
+            f"a{draft_counts.get('approved',0)}/r{draft_counts.get('rejected',0)} "
+            f"agents={agents} useful_agents={useful_agents}"
         )
         print(f"triage_model={self.triage_model}")
         print(f"research_model={self.research_model}")
@@ -759,15 +821,58 @@ class TechnoScout:
             )
 
     def drafts_status(self) -> None:
-        rows = pending_reply_drafts(self.db, int(self.cfg.get("draft_status_limit", 12)))
-        print(f"Reply Drafts | pending={len(rows)} | NOT SENT")
+        counts = reply_draft_counts(self.db)
+        rows = pending_reply_drafts(
+            self.db,
+            int(self.cfg.get("draft_status_limit", 12)),
+        )
+        print(
+            "Reply Drafts | "
+            f"pending={counts.get('pending',0)} "
+            f"approved={counts.get('approved',0)} "
+            f"rejected={counts.get('rejected',0)} | NOT SENT"
+        )
         for row in rows:
             print(
                 f"\n#{row['id']} room={row['room']} target={row['target_agent'][:42]} "
                 f"relationship={row['relationship_score']}\n"
                 f"reason: {row['reason'][:220]}\n"
-                f"draft: {row['draft_text']}"
+                f"draft: {row['draft_text']}\n"
+                f"review: python3 technoscout.py --approve-draft {row['id']} "
+                f"OR --reject-draft {row['id']}"
             )
+
+    def show_draft(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        print(
+            f"Draft #{row['id']} | status={row['status']} | NOT SENT\n"
+            f"room={row['room']} through_seq={row['through_seq']}\n"
+            f"target={row['target_agent']} relationship={row['relationship_score']}\n"
+            f"reason: {row['reason']}\n"
+            f"draft: {row['draft_text']}",
+            flush=True,
+        )
+
+    def review_draft(self, draft_id: int, status: str) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        if str(row["status"]) != "pending":
+            raise ValueError(
+                f"draft #{draft_id} is already {row['status']}"
+            )
+        changed = review_reply_draft(self.db, draft_id, status)
+        if not changed:
+            raise RuntimeError(f"draft #{draft_id} review did not update")
+        self.db.commit()
+        print(
+            f"Draft #{draft_id} -> {status.upper()} LOCALLY | NOT SENT\n"
+            f"room={row['room']} target={row['target_agent']}\n"
+            f"draft: {row['draft_text']}",
+            flush=True,
+        )
 
 
 def main() -> None:
@@ -779,12 +884,16 @@ def main() -> None:
     modes.add_argument("--status", action="store_true")
     modes.add_argument("--agents", action="store_true")
     modes.add_argument("--drafts", action="store_true")
+    modes.add_argument("--show-draft", type=int, metavar="ID")
+    modes.add_argument("--retriage-selected", action="store_true")
+    modes.add_argument("--approve-draft", type=int, metavar="ID")
+    modes.add_argument("--reject-draft", type=int, metavar="ID")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     scout = TechnoScout(cfg)
     print(
-        f"TechnoScout v0.4 READ ONLY | LLM={cfg['llm_backend']} | DB={database_path(cfg)}",
+        f"TechnoScout v0.5 READ ONLY | LLM={cfg['llm_backend']} | DB={database_path(cfg)}",
         flush=True,
     )
     try:
@@ -796,6 +905,19 @@ def main() -> None:
             return
         if args.drafts:
             scout.drafts_status()
+            return
+        if args.show_draft is not None:
+            scout.show_draft(args.show_draft)
+            return
+        if args.retriage_selected:
+            scout.retriage_selected()
+            scout.status()
+            return
+        if args.approve_draft is not None:
+            scout.review_draft(args.approve_draft, "approved")
+            return
+        if args.reject_draft is not None:
+            scout.review_draft(args.reject_draft, "rejected")
             return
         if args.once or not args.loop:
             scout.cycle()

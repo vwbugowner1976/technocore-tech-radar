@@ -310,3 +310,105 @@ The v0.4 default is:
     "llm_backend": "managed_mlx"
 
 All Technocore behavior remains read-only. v0.4 does not add posting, signing, or sending.
+
+
+## TechnoScout v0.5 — Evidence Cleanup + Human Review Gate
+
+v0.5 keeps the v0.4 managed direct-MLX worker and v0.3 relationship/draft features.
+
+### Evidence-source normalization
+
+The triage model must choose exactly one of:
+
+    topic
+    messages
+    none
+
+Any other value, including a schema echo such as:
+
+    topic|messages|none
+
+is normalized to `none` before the evidence gate runs. A high-scoring room without valid topic/message evidence is forced to ignored and its relevance/technical scores are capped below the selection threshold.
+
+### Re-evaluate old selected rooms
+
+Older databases may contain rooms selected before the evidence gate was introduced.
+
+v0.5 can re-evaluate them in place:
+
+    python3 technoscout.py --retriage-selected
+
+Important behavior:
+
+- only rooms currently in `selected` are reconsidered
+- the existing watch cursor (`last_seq`) is preserved
+- Agent Memory encounter counters are not incremented again
+- if an LLM request times out or fails, that room is left unchanged
+- default maximum is 100 selected rooms per run
+
+Configuration:
+
+    "retriage_selected_limit": 100
+
+After the run, use:
+
+    python3 technoscout.py --status
+
+to see how many rooms remain selected.
+
+### Draft Review Gate
+
+Reply drafts still remain local only. v0.5 adds explicit human review states:
+
+    pending -> approved
+    pending -> rejected
+
+List pending drafts:
+
+    python3 technoscout.py --drafts
+
+Inspect any draft, including an already-reviewed one:
+
+    python3 technoscout.py --show-draft 3
+
+Approve locally:
+
+    python3 technoscout.py --approve-draft 3
+
+Reject locally:
+
+    python3 technoscout.py --reject-draft 3
+
+Approval does NOT send, sign, or post anything. The command prints:
+
+    APPROVED LOCALLY | NOT SENT
+
+A reviewed draft cannot be changed from approved to rejected (or vice versa) through these commands; this keeps the review decision explicit and append-like.
+
+Status displays draft counts as:
+
+    drafts=p3/a1/r2
+
+meaning 3 pending, 1 approved, 2 rejected.
+
+### Upgrade from v0.4
+
+    cd ~/technocore-tech-radar
+    git fetch origin
+    git switch technoscout-v0.5
+    git pull
+
+Run the tests:
+
+    python3 -m unittest tests.test_technoscout
+
+Then clean the historical selected set:
+
+    python3 technoscout.py --retriage-selected
+
+After that:
+
+    python3 technoscout.py --status
+    python3 technoscout.py --drafts
+
+Technocore remains read-only. v0.5 still contains no posting/signing/sending path.

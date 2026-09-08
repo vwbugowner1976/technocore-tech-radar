@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite persistence for TechnoScout v0.2."""
+"""SQLite persistence for TechnoScout v0.5."""
 
 from __future__ import annotations
 
@@ -374,3 +374,45 @@ def pending_reply_drafts(con: sqlite3.Connection, limit: int = 20) -> list[sqlit
         """,
         (max(1, int(limit)),),
     ).fetchall()
+
+
+
+def get_reply_draft(con: sqlite3.Connection, draft_id: int) -> sqlite3.Row | None:
+    return con.execute(
+        """
+        SELECT id, created_at, room, through_seq, target_agent,
+               relationship_score, reason, draft_text, status
+        FROM reply_drafts
+        WHERE id=?
+        """,
+        (int(draft_id),),
+    ).fetchone()
+
+
+def review_reply_draft(
+    con: sqlite3.Connection,
+    draft_id: int,
+    status: str,
+) -> bool:
+    normalized = str(status).strip().lower()
+    if normalized not in {"approved", "rejected"}:
+        raise ValueError("draft status must be approved or rejected")
+    cur = con.execute(
+        """
+        UPDATE reply_drafts
+        SET status=?
+        WHERE id=? AND status='pending'
+        """,
+        (normalized, int(draft_id)),
+    )
+    return cur.rowcount > 0
+
+
+def reply_draft_counts(con: sqlite3.Connection) -> dict[str, int]:
+    rows = con.execute(
+        "SELECT status, COUNT(*) n FROM reply_drafts GROUP BY status"
+    ).fetchall()
+    result = {"pending": 0, "approved": 0, "rejected": 0}
+    for row in rows:
+        result[str(row["status"])] = int(row["n"])
+    return result
