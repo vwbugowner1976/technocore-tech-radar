@@ -5,10 +5,13 @@ from pathlib import Path
 from technoscout.common import clamp_score, event_room, parse_json_object, safe_room
 from technoscout.db import (
     agent_context,
+    agent_relationship,
     connect,
+    create_reply_draft,
     get_meta,
     record_agent_encounter,
     record_agent_signal,
+    pending_reply_drafts,
     set_meta,
     top_agents,
 )
@@ -77,6 +80,56 @@ class DatabaseTests(unittest.TestCase):
             context = agent_context(con, ["did:key:test-agent"])
             self.assertEqual(context[0]["signals"], 1)
             self.assertIn("nrf52840", context[0]["topics"])
+            relationship = agent_relationship(con, "did:key:test-agent")
+            self.assertGreaterEqual(relationship["score"], 30)
+            con.close()
+
+    def test_relationship_and_draft_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            record_agent_encounter(
+                con,
+                "did:key:draft-agent",
+                "agents",
+                "2026-09-08T11:00:00+00:00",
+                3,
+            )
+            record_agent_signal(
+                con,
+                ["did:key:draft-agent"],
+                "agents",
+                "2026-09-08T11:01:00+00:00",
+                ["security", "signing"],
+                "Useful signing discussion",
+                True,
+            )
+            relationship = agent_relationship(con, "did:key:draft-agent")
+            created = create_reply_draft(
+                con,
+                "2026-09-08T11:02:00+00:00",
+                "agents",
+                42,
+                "did:key:draft-agent",
+                relationship["score"],
+                "Ask for implementation detail",
+                "Did you also test the canonicalization step across implementations?",
+            )
+            self.assertTrue(created)
+            self.assertFalse(create_reply_draft(
+                con,
+                "2026-09-08T11:03:00+00:00",
+                "agents",
+                42,
+                "did:key:draft-agent",
+                relationship["score"],
+                "duplicate",
+                "duplicate",
+            ))
+            con.commit()
+            drafts = pending_reply_drafts(con, 5)
+            self.assertEqual(len(drafts), 1)
+            self.assertEqual(drafts[0]["room"], "agents")
+            self.assertEqual(drafts[0]["status"], "pending")
             con.close()
 
 
