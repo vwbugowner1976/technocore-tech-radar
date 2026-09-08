@@ -197,3 +197,116 @@ Pending reply drafts:
     python3 technoscout.py --drafts
 
 The draft list explicitly prints NOT SENT. No draft is posted, signed, or transmitted by v0.3.
+
+
+## TechnoScout v0.4 — Managed Direct MLX Worker
+
+v0.4 replaces the normal TechnoScout inference path through `mlx_lm.server` with a directly managed MLX worker process.
+
+Architecture:
+
+    TechnoScout
+        |
+        | JSON-lines over stdin/stdout
+        v
+    technoscout/mlx_worker.py
+        |
+        | mlx_lm Python API
+        v
+    Qwen / MLX model
+
+The worker loads the configured model once and stays resident between requests.
+
+### Why this exists
+
+An HTTP client timeout only means the client stopped waiting. The old `mlx_lm.server` process could continue the generation in its own queue after TechnoScout printed `-- skipped`.
+
+The managed worker changes the timeout contract:
+
+    request deadline exceeded
+        -> SIGTERM worker process group
+        -> short grace period
+        -> SIGKILL if still alive
+        -> wait for process exit
+        -> only then raise TimeoutError
+        -> next request starts a fresh worker
+
+Therefore a timed-out TechnoScout request cannot remain running behind later requests.
+
+### Before first v0.4 run
+
+Stop the manually started MLX HTTP server. It is no longer needed and keeping it running would load another copy of the model.
+
+Preferred: Ctrl-C in the terminal running `mlx_lm.server`.
+
+If needed:
+
+    pkill -f "mlx_lm.server"
+
+Upgrade:
+
+    cd ~/technocore-tech-radar
+    git fetch origin
+    git switch technoscout-v0.4
+    git pull
+
+Run tests:
+
+    python3 -m unittest tests.test_technoscout
+
+The managed-worker timeout test uses a fake worker and does not load the real 7B model.
+
+### MLX environment discovery
+
+By default TechnoScout looks for:
+
+    ~/.local/share/uv/tools/mlx-lm/bin/python
+
+This matches a normal `uv tool` installation of mlx-lm. If that interpreter is not present, it falls back to the Python running TechnoScout.
+
+You can override it in `technoscout.config.json`:
+
+    "mlx_worker_python": "/Users/macmini/.local/share/uv/tools/mlx-lm/bin/python"
+
+Worker diagnostics are written to:
+
+    logs/mlx-worker.log
+
+### Safe test
+
+No separate LLM server is required.
+
+    python3 technoscout.py --status
+    python3 technoscout.py --once
+
+The first real LLM request starts the worker and prints something similar to:
+
+    [llm-worker] start model=mlx-community/Qwen2.5-Coder-7B-Instruct-4bit ...
+    [llm-worker] ready pid=12345 ...
+
+On a hard request timeout:
+
+    [llm-worker] stop pid=12345 reason=request-timeout id=...
+    [watch ...] TIMEOUT/NETWORK ... worker pid=12345 was killed -- skipped
+
+The next LLM request automatically starts a fresh worker.
+
+v0.4 uses separate defaults for triage and watch deadlines:
+
+    triage_timeout_seconds = 90
+    watch_timeout_seconds = 60
+    draft_timeout_seconds = 30
+
+The first request after loading/reloading a model gets an additional startup-generation allowance (default 60 seconds).
+
+### HTTP fallback
+
+For comparison/debugging only, the old OpenAI-compatible path still exists:
+
+    "llm_backend": "http"
+
+The v0.4 default is:
+
+    "llm_backend": "managed_mlx"
+
+All Technocore behavior remains read-only. v0.4 does not add posting, signing, or sending.
