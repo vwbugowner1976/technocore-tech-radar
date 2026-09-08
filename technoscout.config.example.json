@@ -32,6 +32,8 @@
   "loop_idle_seconds": 2,
   "http_timeout_seconds": 25,
   "llm_timeout_seconds": 90,
+  "triage_timeout_seconds": 90,
+  "watch_timeout_seconds": 60,
   "llm_max_tokens": 320,
   "llm_json_repair": true,
   "llm_json_repair_max_tokens": 320,
