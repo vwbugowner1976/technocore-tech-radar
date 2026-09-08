@@ -321,6 +321,35 @@ class SenderCryptoTests(unittest.TestCase):
         signature = identity.sign("agents", 7, "hello")
         self.assertEqual(len(signature), 86)
 
+    def test_legacy_passphrase_seed_compatibility(self):
+        try:
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        except BaseException:
+            self.skipTest("cryptography is not installed")
+
+        legacy_value = "A" * 64
+        self.assertFalse(all(ch in "0123456789abcdefABCDEF" for ch in legacy_value))
+        old = os.environ.get("TECHNOSCOUT_TEST_LEGACY")
+        os.environ["TECHNOSCOUT_TEST_LEGACY"] = legacy_value
+        try:
+            identity = SigningIdentity.from_env("TECHNOSCOUT_TEST_LEGACY")
+        finally:
+            if old is None:
+                os.environ.pop("TECHNOSCOUT_TEST_LEGACY", None)
+            else:
+                os.environ["TECHNOSCOUT_TEST_LEGACY"] = old
+
+        import hashlib
+        expected_seed = hashlib.sha256(legacy_value.encode("utf-8")).digest()
+        self.assertEqual(identity.seed, expected_seed)
+
+        diag = diagnose_signing_material(legacy_value)
+        self.assertIn("legacy_sha256_text", diag["candidate_dids"])
+        self.assertEqual(
+            diag["candidate_dids"]["legacy_sha256_text"],
+            identity.did,
+        )
+
     def test_signing_identity_round_trip(self):
         try:
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
