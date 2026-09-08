@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for TechnoScout v0.1.4."""
+"""Shared helpers for TechnoScout v0.2."""
 
 from __future__ import annotations
 
@@ -201,11 +201,12 @@ def local_llm_json(
     model: str,
     system_prompt: str,
     untrusted_data: Any,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
     payload = {
         "model": model,
         "temperature": 0.1,
-        "max_tokens": int(cfg.get("llm_max_tokens", 320)),
+        "max_tokens": int(max_tokens if max_tokens is not None else cfg.get("llm_max_tokens", 320)),
         "messages": [
             {"role": "system", "content": system_prompt},
             {
