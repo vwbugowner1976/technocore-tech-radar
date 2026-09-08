@@ -60,6 +60,93 @@ def _base58btc(data: bytes) -> str:
     return ("1" * zeros) + (encoded or ("" if zeros else "1"))
 
 
+def _did_from_seed(seed: bytes) -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    private_key = Ed25519PrivateKey.from_private_bytes(seed)
+    public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return "did:key:z" + _base58btc(DID_PREFIX + public_key)
+
+
+def diagnose_signing_material(value: str) -> dict[str, Any]:
+    """Return non-secret structural diagnostics and candidate public DIDs."""
+    value = str(value or "").strip()
+    result: dict[str, Any] = {
+        "chars": len(value),
+        "hex64": bool(SEED_RE.fullmatch(value)),
+        "base64_standard": False,
+        "base64_urlsafe": False,
+        "decoded_lengths": [],
+        "pkcs8_ed25519": False,
+        "candidate_dids": {},
+    }
+
+    if SEED_RE.fullmatch(value):
+        try:
+            result["candidate_dids"]["hex_raw32"] = _did_from_seed(bytes.fromhex(value))
+        except Exception:
+            pass
+
+    seen: set[bytes] = set()
+    padded = value + ("=" * ((4 - len(value) % 4) % 4))
+    for name, altchars in (("standard", None), ("urlsafe", b"-_")):
+        try:
+            decoded = base64.b64decode(
+                padded.encode("ascii"),
+                altchars=altchars,
+                validate=True,
+            )
+        except Exception:
+            continue
+
+        result[f"base64_{name}"] = True
+        result["decoded_lengths"].append(len(decoded))
+        if decoded in seen:
+            continue
+        seen.add(decoded)
+
+        if len(decoded) == 32:
+            try:
+                result["candidate_dids"][f"base64_{name}_raw32"] = _did_from_seed(decoded)
+            except Exception:
+                pass
+
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            loaded = serialization.load_der_private_key(decoded, password=None)
+        except Exception:
+            loaded = None
+        if isinstance(loaded, Ed25519PrivateKey):
+            result["pkcs8_ed25519"] = True
+            seed = loaded.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            result["candidate_dids"][f"base64_{name}_pkcs8"] = _did_from_seed(seed)
+
+        # Diagnostic-only candidates for legacy containers that embed a 32-byte
+        # Ed25519 seed inside a larger decoded value. These are never accepted
+        # automatically for signing.
+        if len(decoded) > 32:
+            for label, seed in (
+                ("first32", decoded[:32]),
+                ("last32", decoded[-32:]),
+            ):
+                try:
+                    result["candidate_dids"][f"base64_{name}_{label}"] = _did_from_seed(seed)
+                except Exception:
+                    pass
+
+    result["decoded_lengths"] = sorted(set(result["decoded_lengths"]))
+    return result
+
+
 @dataclass(frozen=True)
 class SigningIdentity:
     seed: bytes
