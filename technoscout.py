@@ -842,7 +842,10 @@ class TechnoScout:
             "Reply Drafts | "
             f"pending={counts.get('pending',0)} "
             f"approved={counts.get('approved',0)} "
-            f"rejected={counts.get('rejected',0)} | NOT SENT"
+            f"rejected={counts.get('rejected',0)} "
+            f"sent={counts.get('sent',0)} "
+            f"uncertain={counts.get('send_uncertain',0)} "
+            f"blocked={counts.get('send_blocked',0)}"
         )
         for row in rows:
             print(
@@ -858,8 +861,15 @@ class TechnoScout:
         row = get_reply_draft(self.db, draft_id)
         if row is None:
             raise ValueError(f"draft #{draft_id} not found")
+        delivery = (
+            "SENT"
+            if str(row["status"]) == "sent"
+            else "SEND UNCERTAIN"
+            if str(row["status"]) == "send_uncertain"
+            else "NOT SENT"
+        )
         print(
-            f"Draft #{row['id']} | status={row['status']} | NOT SENT\n"
+            f"Draft #{row['id']} | status={row['status']} | {delivery}\n"
             f"room={row['room']} through_seq={row['through_seq']}\n"
             f"target={row['target_agent']} relationship={row['relationship_score']}\n"
             f"reason: {row['reason']}\n"
