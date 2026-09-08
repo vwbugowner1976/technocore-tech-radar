@@ -46,7 +46,9 @@ from technoscout.db import (
     pending_reply_drafts,
     reply_draft_counts,
     review_reply_draft,
+    revoke_send_permits,
     send_attempts_for_draft,
+    send_permits_for_draft,
     set_meta,
     top_agents,
 )
@@ -997,6 +999,43 @@ class TechnoScout:
             flush=True,
         )
 
+    def send_permits_status(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        permits = send_permits_for_draft(self.db, draft_id, limit=20)
+        print(
+            f"Send Permits | draft=#{draft_id} status={row['status']} "
+            f"count={len(permits)}",
+            flush=True,
+        )
+        for permit in permits:
+            created = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(float(permit["created_at"])),
+            )
+            expires = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(float(permit["expires_at"])),
+            )
+            print(
+                f"  permit=#{permit['id']} status={permit['status']} "
+                f"created={created} expires={expires} "
+                f"room={permit['room']} did={permit['did']}",
+                flush=True,
+            )
+
+    def disarm_send(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        count = revoke_send_permits(self.db, draft_id)
+        self.db.commit()
+        print(
+            f"Send permit revoked | draft=#{draft_id} armed_permits_revoked={count}",
+            flush=True,
+        )
+
     def send_attempts_status(self, draft_id: int) -> None:
         row = get_reply_draft(self.db, draft_id)
         if row is None:
@@ -1057,7 +1096,9 @@ def main() -> None:
     modes.add_argument("--sender-status", action="store_true")
     modes.add_argument("--diagnose-seed", action="store_true")
     modes.add_argument("--send-attempts", type=int, metavar="ID")
+    modes.add_argument("--send-permits", type=int, metavar="ID")
     modes.add_argument("--arm-send", type=int, metavar="ID")
+    modes.add_argument("--disarm-send", type=int, metavar="ID")
     modes.add_argument("--send-approved", type=int, metavar="ID")
     args = parser.parse_args()
 
@@ -1101,8 +1142,14 @@ def main() -> None:
         if args.send_attempts is not None:
             scout.send_attempts_status(args.send_attempts)
             return
+        if args.send_permits is not None:
+            scout.send_permits_status(args.send_permits)
+            return
         if args.arm_send is not None:
             scout.arm_send(args.arm_send)
+            return
+        if args.disarm_send is not None:
+            scout.disarm_send(args.disarm_send)
             return
         if args.send_approved is not None:
             scout.send_approved(args.send_approved, args.permit)
