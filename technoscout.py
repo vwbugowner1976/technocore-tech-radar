@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TechnoScout v0.5: read-only Technocore scout powered by a local LLM."""
+"""TechnoScout v0.6: local scout with explicit approved-draft sending."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from technoscout.common import (
     utc_now,
 )
 from technoscout.llm_backend import create_llm_backend
+from technoscout.sender import ApprovedDraftSender, SigningIdentity
 from technoscout.db import (
     agent_context,
     agent_relationship,
@@ -41,6 +42,7 @@ from technoscout.db import (
     pending_reply_drafts,
     reply_draft_counts,
     review_reply_draft,
+    send_attempts_for_draft,
     set_meta,
     top_agents,
 )
@@ -143,6 +145,9 @@ def load_config(path: str) -> dict[str, Any]:
         "draft_min_relationship_score": 0,
         "draft_status_limit": 12,
         "retriage_selected_limit": 100,
+        "sending_enabled": False,
+        "signing_seed_env": "SIGN_SEED",
+        "sender_timeout_seconds": 20,
         "prefilter_keywords": [
             "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
             "embedded", "firmware", "mcu", "usb", "agent", "llm", "mcp", "tooling", "protocol",
@@ -781,14 +786,21 @@ class TechnoScout:
             "SELECT COUNT(*) n FROM agents WHERE useful_signal_count > 0"
         ).fetchone()["n"]
         print(
-            f"TechnoScout v0.5 | rooms={total} selected={selected} pending={pending} "
+            f"TechnoScout v0.6 | rooms={total} selected={selected} pending={pending} "
             f"signals={signals} drafts=p{draft_counts.get('pending',0)}/"
-            f"a{draft_counts.get('approved',0)}/r{draft_counts.get('rejected',0)} "
+            f"a{draft_counts.get('approved',0)}/r{draft_counts.get('rejected',0)}/"
+            f"s{draft_counts.get('sent',0)}/u{draft_counts.get('send_uncertain',0)}/"
+            f"b{draft_counts.get('send_blocked',0)} "
             f"agents={agents} useful_agents={useful_agents}"
         )
-        print(f"triage_model={self.triage_model}")
-        print(f"research_model={self.research_model}")
-        print(f"llm_backend={self.llm.describe()}")
+        print(f"triage_model={self.triage_model}", flush=True)
+        print(f"research_model={self.research_model}", flush=True)
+        print(f"llm_backend={self.llm.describe()}", flush=True)
+        print(
+            f"sending_enabled={bool(self.cfg.get('sending_enabled', False))} "
+            "(explicit --send-approved only)",
+            flush=True,
+        )
         print(
             "watch="
             f"{self.cfg['watch_rooms_per_cycle']} rooms/cycle, "
@@ -874,9 +886,63 @@ class TechnoScout:
             flush=True,
         )
 
+    def sender_status(self) -> None:
+        env_name = str(self.cfg.get("signing_seed_env", "SIGN_SEED"))
+        enabled = bool(self.cfg.get("sending_enabled", False))
+        try:
+            identity = SigningIdentity.from_env(env_name)
+            identity_status = f"ready did={identity.did}"
+        except Exception as exc:
+            identity_status = f"not-ready ({type(exc).__name__}: {exc})"
+        print(
+            "Sender v0.6 | "
+            f"enabled={enabled} | seed_env={env_name} | {identity_status}\n"
+            "Policy: approved draft + sending_enabled=true + explicit "
+            "--send-approved ID. No autonomous sends.",
+            flush=True,
+        )
+
+    def send_attempts_status(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        attempts = send_attempts_for_draft(self.db, draft_id, limit=20)
+        print(
+            f"Send Attempts | draft=#{draft_id} status={row['status']} "
+            f"count={len(attempts)}",
+            flush=True,
+        )
+        for attempt in attempts:
+            print(
+                f"  attempt=#{attempt['id']} status={attempt['status']} "
+                f"http={attempt['http_status']} room={attempt['room']} "
+                f"nonce={attempt['nonce']} did={attempt['did']} "
+                f"detail={attempt['detail'][:180]}",
+                flush=True,
+            )
+
+    def send_approved(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        sender = ApprovedDraftSender(self.cfg, self.db)
+        result = sender.send_draft(row)
+        print(
+            "SIGNED SEND VERIFIED\n"
+            f"draft=#{result['draft_id']} room={result['room']} "
+            f"seq={result['seq']}\n"
+            f"did={result['did']}\n"
+            f"nonce={result['nonce']}\n"
+            "The exact signed record was present in Technocore's HTTP 200 "
+            "JSON response.",
+            flush=True,
+        )
+
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Read-only Technocore scout using a local LLM")
+    parser = argparse.ArgumentParser(
+        description="Technocore scout; sending requires an approved draft and explicit command"
+    )
     parser.add_argument("--config", default="technoscout.config.json")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--once", action="store_true")
@@ -888,12 +954,17 @@ def main() -> None:
     modes.add_argument("--retriage-selected", action="store_true")
     modes.add_argument("--approve-draft", type=int, metavar="ID")
     modes.add_argument("--reject-draft", type=int, metavar="ID")
+    modes.add_argument("--sender-status", action="store_true")
+    modes.add_argument("--send-attempts", type=int, metavar="ID")
+    modes.add_argument("--send-approved", type=int, metavar="ID")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     scout = TechnoScout(cfg)
     print(
-        f"TechnoScout v0.5 READ ONLY | LLM={cfg['llm_backend']} | DB={database_path(cfg)}",
+        f"TechnoScout v0.6 | default=READ-ONLY | "
+        f"send={'ENABLED' if cfg.get('sending_enabled') else 'disabled'} | "
+        f"LLM={cfg['llm_backend']} | DB={database_path(cfg)}",
         flush=True,
     )
     try:
@@ -918,6 +989,15 @@ def main() -> None:
             return
         if args.reject_draft is not None:
             scout.review_draft(args.reject_draft, "rejected")
+            return
+        if args.sender_status:
+            scout.sender_status()
+            return
+        if args.send_attempts is not None:
+            scout.send_attempts_status(args.send_attempts)
+            return
+        if args.send_approved is not None:
+            scout.send_approved(args.send_approved)
             return
         if args.once or not args.loop:
             scout.cycle()
