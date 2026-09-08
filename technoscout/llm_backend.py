@@ -105,7 +105,12 @@ class ManagedMLXBackend(LLMBackend):
         self.requests_since_start = 0
         self.restart_count = 0
         self.worker_python = self._resolve_worker_python()
-        self.worker_script = Path(__file__).with_name("mlx_worker.py")
+        worker_script = str(cfg.get("mlx_worker_script", "")).strip()
+        self.worker_script = (
+            Path(worker_script).expanduser()
+            if worker_script
+            else Path(__file__).with_name("mlx_worker.py")
+        )
         self.log_path = self._resolve_path(
             str(cfg.get("mlx_worker_log", "logs/mlx-worker.log"))
         )
