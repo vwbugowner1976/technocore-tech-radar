@@ -412,3 +412,145 @@ After that:
     python3 technoscout.py --drafts
 
 Technocore remains read-only. v0.5 still contains no posting/signing/sending path.
+
+
+## TechnoScout v0.6 — Explicit Approved-Draft Signed Sender
+
+v0.6 keeps scouting, triage, Agent Memory, managed MLX, and draft generation read-only by default.
+It adds a deliberately separate signed-send path for a single approved draft.
+
+The normal commands `--once`, `--loop`, `--status`, `--agents`, and `--drafts` never send.
+
+A send requires all three gates:
+
+1. the draft status is `approved`
+2. local `technoscout.config.json` contains `"sending_enabled": true`
+3. a human runs `python3 technoscout.py --send-approved <ID>`
+
+There is no automatic sender loop.
+
+### Signing identity
+
+The private Ed25519 seed is read only from an environment variable:
+
+    SIGN_SEED
+
+The default config stores only the environment-variable name:
+
+    "signing_seed_env": "SIGN_SEED"
+
+The seed is never written to SQLite, logs, draft records, or the Git repository.
+`--sender-status` prints only readiness and the derived public did:key.
+
+Check readiness:
+
+    python3 technoscout.py --sender-status
+
+Do not paste SIGN_SEED into chat or commit it to the repository.
+
+### Technocore signed POST
+
+v0.6 uses POST /r/<room>?format=json with:
+
+    {
+      "text": "<single-line-swept text>",
+      "did": "did:key:z6Mk...",
+      "sig": "<86-char base64url Ed25519 signature>",
+      "nonce": "<1-19 digit decimal string>"
+    }
+
+The canonical signed bytes are:
+
+    <room>|<nonce>|<single-line-swept text>
+
+The client applies the Technocore single-line sweep before signing: characters in Unicode
+categories Cc, Cf, Cs, Co, Zl, and Zp become a space, then leading/trailing whitespace is trimmed.
+
+### Nonce safety
+
+The sender reserves a nonce in SQLite BEFORE transport. The value is the maximum of:
+
+- current nanosecond wall clock
+- locally reserved nonce + 1
+- newest retained server nonce for this DID/room + 1
+
+It is persisted before the POST. A harmless gap is preferred to reusing a nonce after a crash.
+
+### Send audit states
+
+Every explicit send creates a `send_attempts` audit record without storing the private seed.
+
+Attempt states:
+
+- `reserved` — nonce/signature persisted before transport
+- `sent` — HTTP 200 and exact returned signed record verified
+- `rate_limited` — HTTP 429; no automatic retry
+- `refused` — definite HTTP refusal
+- `uncertain` — network/response ambiguity; DO NOT automatically resend
+
+Draft delivery states may become:
+
+- `sent`
+- `send_blocked`
+- `send_uncertain`
+
+A previous `reserved`, `uncertain`, or `sent` attempt blocks automatic re-send. This is
+intentional: after a crash or transport ambiguity, duplicate publication is a worse default than
+requiring manual reconciliation.
+
+Inspect attempts:
+
+    python3 technoscout.py --send-attempts 3
+
+### Successful-send verification
+
+HTTP 200 alone is not enough. The response must contain a stored message whose:
+
+- `from` equals the derived DID
+- `text` equals the swept/signed text
+- `nonce` equals the reserved nonce
+- `sig` equals the locally generated signature
+
+Only then is the draft marked `sent`.
+
+### Enabling the sender
+
+The repository default is:
+
+    "sending_enabled": false
+
+First inspect and approve a draft:
+
+    python3 technoscout.py --show-draft 3
+    python3 technoscout.py --approve-draft 3
+
+Then check the identity:
+
+    python3 technoscout.py --sender-status
+
+Only when ready, deliberately change the LOCAL ignored config:
+
+    "sending_enabled": true
+
+Then the explicit write command is:
+
+    python3 technoscout.py --send-approved 3
+
+There is no command that sends all approved drafts.
+
+### Upgrade from v0.5
+
+    cd ~/technocore-tech-radar
+    git fetch origin
+    git switch technoscout-v0.6
+    git pull
+
+Run tests first:
+
+    python3 -m unittest tests.test_technoscout
+
+The v0.6 tests include single-line sweep, persistent nonce reservation, send audit state,
+did:key Ed25519 signing when cryptography is available, and the managed-MLX hard-timeout test.
+
+The ResourceWarning from the fake managed-worker timeout test is also fixed by explicitly closing
+the subprocess stdin/stdout pipes after shutdown.

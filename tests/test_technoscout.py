@@ -1,3 +1,5 @@
+import base64
+import os
 import sys
 import tempfile
 import time
@@ -12,6 +14,7 @@ from technoscout.common import (
     safe_room,
 )
 from technoscout.llm_backend import ManagedMLXBackend
+from technoscout.sender import SigningIdentity, diagnose_signing_material, sweep_text
 from technoscout.db import (
     agent_context,
     agent_relationship,
@@ -23,6 +26,11 @@ from technoscout.db import (
     record_agent_signal,
     pending_reply_drafts,
     reply_draft_counts,
+    reserve_send_nonce,
+    create_send_attempt,
+    finish_send_attempt,
+    get_last_send_attempt,
+    set_draft_status,
     review_reply_draft,
     set_meta,
     top_agents,
@@ -59,6 +67,12 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(normalize_evidence_source("MESSAGES"), "messages")
         self.assertEqual(normalize_evidence_source("topic|messages|none"), "none")
         self.assertEqual(normalize_evidence_source(None), "none")
+
+    def test_single_line_sweep(self):
+        self.assertEqual(sweep_text("  a\nb\u200bc  "), "a b c")
+        self.assertEqual(sweep_text("hello"), "hello")
+        with self.assertRaises(ValueError):
+            sweep_text("\n\u200b")
 
     def test_score_clamp(self):
         self.assertEqual(clamp_score(101), 100)
@@ -150,6 +164,71 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(drafts[0]["status"], "pending")
             con.close()
 
+    def test_nonce_reservation_and_send_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            first = reserve_send_nonce(
+                con,
+                "did:key:test",
+                "agents",
+                server_nonce=10,
+                floor=100,
+            )
+            second = reserve_send_nonce(
+                con,
+                "did:key:test",
+                "agents",
+                server_nonce=50,
+                floor=20,
+            )
+            third = reserve_send_nonce(
+                con,
+                "did:key:test",
+                "agents",
+                server_nonce=500,
+                floor=20,
+            )
+            self.assertEqual((first, second, third), (100, 101, 501))
+
+            self.assertTrue(create_reply_draft(
+                con,
+                "2026-09-09T01:00:00+00:00",
+                "agents",
+                100,
+                "did:key:target",
+                40,
+                "audit test",
+                "hello",
+            ))
+            draft_id = int(pending_reply_drafts(con, 1)[0]["id"])
+            self.assertTrue(review_reply_draft(con, draft_id, "approved"))
+            attempt_id = create_send_attempt(
+                con,
+                draft_id,
+                "2026-09-09T01:01:00Z",
+                "did:key:sender",
+                "agents",
+                501,
+                "A" * 86,
+                "hello",
+            )
+            finish_send_attempt(
+                con,
+                attempt_id,
+                "sent",
+                200,
+                "seq=123",
+            )
+            set_draft_status(con, draft_id, "sent")
+            con.commit()
+
+            attempt = get_last_send_attempt(con, draft_id)
+            self.assertEqual(attempt["status"], "sent")
+            self.assertEqual(attempt["nonce"], "501")
+            self.assertEqual(get_reply_draft(con, draft_id)["status"], "sent")
+            self.assertEqual(reply_draft_counts(con)["sent"], 1)
+            con.close()
+
     def test_draft_review_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             con = connect(Path(tmp) / "test.db")
@@ -177,6 +256,100 @@ class DatabaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 review_reply_draft(con, draft_id, "sent")
             con.close()
+
+
+class SenderCryptoTests(unittest.TestCase):
+    def test_signing_seed_private_env_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text("SIGN_SEED=" + ("01" * 32) + "\n", encoding="utf-8")
+            env_file.chmod(0o600)
+            old = os.environ.pop("SIGN_SEED", None)
+            try:
+                identity = SigningIdentity.from_env("SIGN_SEED", str(env_file))
+                self.assertTrue(identity.did.startswith("did:key:z6Mk"))
+                env_file.chmod(0o644)
+                with self.assertRaises(RuntimeError):
+                    SigningIdentity.from_env("SIGN_SEED", str(env_file))
+            finally:
+                if old is not None:
+                    os.environ["SIGN_SEED"] = old
+
+    def test_diagnose_base64_legacy_shape(self):
+        raw = bytes(range(48))
+        encoded = base64.b64encode(raw).decode("ascii")
+        self.assertEqual(len(encoded), 64)
+        result = diagnose_signing_material(encoded)
+        self.assertEqual(result["chars"], 64)
+        self.assertTrue(result["base64_standard"])
+        self.assertIn(48, result["decoded_lengths"])
+        self.assertFalse(result["pkcs8_ed25519"])
+        self.assertIn("base64_standard_first32", result["candidate_dids"])
+        self.assertIn("base64_standard_last32", result["candidate_dids"])
+
+    def test_base64_pkcs8_seed_round_trip(self):
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        except BaseException:
+            self.skipTest("cryptography is not installed")
+
+        private_key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex("02" * 32))
+        der = private_key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        encoded = base64.b64encode(der).decode("ascii")
+        self.assertEqual(len(encoded), 64)
+
+        old = os.environ.get("TECHNOSCOUT_TEST_B64")
+        os.environ["TECHNOSCOUT_TEST_B64"] = encoded
+        try:
+            identity = SigningIdentity.from_env("TECHNOSCOUT_TEST_B64")
+        finally:
+            if old is None:
+                os.environ.pop("TECHNOSCOUT_TEST_B64", None)
+            else:
+                os.environ["TECHNOSCOUT_TEST_B64"] = old
+
+        expected = SigningIdentity(
+            seed=bytes.fromhex("02" * 32),
+            did=identity.did,
+        )
+        self.assertEqual(identity.seed, expected.seed)
+        signature = identity.sign("agents", 7, "hello")
+        self.assertEqual(len(signature), 86)
+
+    def test_signing_identity_round_trip(self):
+        try:
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        except BaseException:
+            self.skipTest("cryptography is not installed")
+
+        old = os.environ.get("TECHNOSCOUT_TEST_SEED")
+        os.environ["TECHNOSCOUT_TEST_SEED"] = "00" * 32
+        try:
+            identity = SigningIdentity.from_env("TECHNOSCOUT_TEST_SEED")
+        finally:
+            if old is None:
+                os.environ.pop("TECHNOSCOUT_TEST_SEED", None)
+            else:
+                os.environ["TECHNOSCOUT_TEST_SEED"] = old
+
+        self.assertTrue(identity.did.startswith("did:key:z6Mk"))
+        signature = identity.sign("agents", 123, "hello")
+        self.assertEqual(len(signature), 86)
+
+        alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        number = 0
+        for ch in identity.did.removeprefix("did:key:z"):
+            number = number * 58 + alphabet.index(ch)
+        decoded = number.to_bytes((number.bit_length() + 7) // 8, "big")
+        self.assertEqual(decoded[:2], b"\xed\x01")
+        public_key = Ed25519PublicKey.from_public_bytes(decoded[2:])
+        raw_sig = base64.urlsafe_b64decode(signature + "==")
+        public_key.verify(raw_sig, b"agents|123|hello")
 
 
 class ManagedWorkerTests(unittest.TestCase):
