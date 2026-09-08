@@ -3,7 +3,14 @@ import unittest
 from pathlib import Path
 
 from technoscout.common import clamp_score, event_room, parse_json_object, safe_room
-from technoscout.db import connect, get_meta, set_meta
+from technoscout.db import (
+    connect,
+    get_meta,
+    record_agent_encounter,
+    record_agent_signal,
+    set_meta,
+    top_agents,
+)
 
 
 class CommonTests(unittest.TestCase):
@@ -44,6 +51,28 @@ class DatabaseTests(unittest.TestCase):
             set_meta(con, "cursor", 123)
             con.commit()
             self.assertEqual(get_meta(con, "cursor"), "123")
+            con.close()
+
+    def test_agent_memory_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            record_agent_encounter(con, "did:key:test-agent", "embedded-lab", "2026-09-08T10:00:00+00:00", 2)
+            record_agent_signal(
+                con,
+                ["did:key:test-agent"],
+                "embedded-lab",
+                "2026-09-08T10:01:00+00:00",
+                ["zmk", "nrf52840"],
+                "Useful embedded result",
+                True,
+            )
+            con.commit()
+            rows = top_agents(con, 5)
+            self.assertEqual(rows[0]["agent_id"], "did:key:test-agent")
+            self.assertEqual(rows[0]["encounter_count"], 2)
+            self.assertEqual(rows[0]["useful_signal_count"], 1)
+            self.assertEqual(rows[0]["followup_count"], 1)
+            self.assertIn("zmk", rows[0]["topics"])
             con.close()
 
 
