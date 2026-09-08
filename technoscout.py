@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""TechnoScout v0.6: local scout with explicit approved-draft sending."""
+"""TechnoScout v0.7: local scout with one-time-permit signed sending."""
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import socket
 import sys
@@ -46,7 +47,9 @@ from technoscout.db import (
     pending_reply_drafts,
     reply_draft_counts,
     review_reply_draft,
+    revoke_send_permits,
     send_attempts_for_draft,
+    send_permits_for_draft,
     set_meta,
     top_agents,
 )
@@ -150,6 +153,8 @@ def load_config(path: str) -> dict[str, Any]:
         "draft_status_limit": 12,
         "retriage_selected_limit": 100,
         "sending_enabled": False,
+        "send_permit_required": True,
+        "send_permit_ttl_seconds": 600,
         "signing_seed_env": "SIGN_SEED",
         "signing_env_file": ".env",
         "sender_timeout_seconds": 20,
@@ -791,7 +796,7 @@ class TechnoScout:
             "SELECT COUNT(*) n FROM agents WHERE useful_signal_count > 0"
         ).fetchone()["n"]
         print(
-            f"TechnoScout v0.6 | rooms={total} selected={selected} pending={pending} "
+            f"TechnoScout v0.7 | rooms={total} selected={selected} pending={pending} "
             f"signals={signals} drafts=p{draft_counts.get('pending',0)}/"
             f"a{draft_counts.get('approved',0)}/r{draft_counts.get('rejected',0)}/"
             f"s{draft_counts.get('sent',0)}/u{draft_counts.get('send_uncertain',0)}/"
@@ -802,8 +807,9 @@ class TechnoScout:
         print(f"research_model={self.research_model}", flush=True)
         print(f"llm_backend={self.llm.describe()}", flush=True)
         print(
-            f"sending_enabled={bool(self.cfg.get('sending_enabled', False))} "
-            "(explicit --send-approved only)",
+            f"send_permit_required={bool(self.cfg.get('send_permit_required', True))} "
+            f"ttl={int(self.cfg.get('send_permit_ttl_seconds', 600))}s "
+            "(approve -> arm -> one explicit send)",
             flush=True,
         )
         print(
@@ -887,9 +893,11 @@ class TechnoScout:
         if row is None:
             raise ValueError(f"draft #{draft_id} not found")
         if str(row["status"]) != "pending":
-            raise ValueError(
-                f"draft #{draft_id} is already {row['status']}"
+            print(
+                f"Draft #{draft_id} already {row['status']} | no change",
+                flush=True,
             )
+            return
         changed = review_reply_draft(self.db, draft_id, status)
         if not changed:
             raise RuntimeError(f"draft #{draft_id} review did not update")
@@ -952,7 +960,8 @@ class TechnoScout:
 
     def sender_status(self) -> None:
         env_name = str(self.cfg.get("signing_seed_env", "SIGN_SEED"))
-        enabled = bool(self.cfg.get("sending_enabled", False))
+        permit_required = bool(self.cfg.get("send_permit_required", True))
+        ttl = int(self.cfg.get("send_permit_ttl_seconds", 600))
         try:
             identity = SigningIdentity.from_env(
                 env_name,
@@ -962,10 +971,72 @@ class TechnoScout:
         except Exception as exc:
             identity_status = f"not-ready ({type(exc).__name__}: {exc})"
         print(
-            "Sender v0.6 | "
-            f"enabled={enabled} | seed_env={env_name} | {identity_status}\n"
-            "Policy: approved draft + sending_enabled=true + explicit "
-            "--send-approved ID. No autonomous sends.",
+            "Sender v0.7 | "
+            f"one_time_permit={permit_required} ttl={ttl}s | "
+            f"seed_env={env_name} | {identity_status}\n"
+            "Policy: approved draft -> --arm-send ID -> "
+            "--send-approved ID --permit TOKEN. No autonomous sends.",
+            flush=True,
+        )
+
+    def arm_send(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        sender = ApprovedDraftSender(self.cfg, self.db)
+        permit = sender.arm_draft(row)
+        expires = time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            time.localtime(float(permit["expires_at"])),
+        )
+        print(
+            "ONE-TIME SEND PERMIT ARMED\n"
+            f"draft=#{permit['draft_id']} room={permit['room']}\n"
+            f"did={permit['did']}\n"
+            f"expires={expires} ({permit['ttl_seconds']}s)\n"
+            f"permit={permit['token']}\n\n"
+            "Use exactly once before expiry:\n"
+            f".venv/bin/python technoscout.py --send-approved "
+            f"{permit['draft_id']}\n"
+            "Then paste the permit at the hidden prompt. "
+            "The database stores only a SHA-256 hash of this permit.",
+            flush=True,
+        )
+
+    def send_permits_status(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        permits = send_permits_for_draft(self.db, draft_id, limit=20)
+        print(
+            f"Send Permits | draft=#{draft_id} status={row['status']} "
+            f"count={len(permits)}",
+            flush=True,
+        )
+        for permit in permits:
+            created = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(float(permit["created_at"])),
+            )
+            expires = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(float(permit["expires_at"])),
+            )
+            print(
+                f"  permit=#{permit['id']} status={permit['status']} "
+                f"created={created} expires={expires} "
+                f"room={permit['room']} did={permit['did']}",
+                flush=True,
+            )
+
+    def disarm_send(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        count = revoke_send_permits(self.db, draft_id)
+        self.db.commit()
+        print(
+            f"Send permit revoked | draft=#{draft_id} armed_permits_revoked={count}",
             flush=True,
         )
 
@@ -988,12 +1059,12 @@ class TechnoScout:
                 flush=True,
             )
 
-    def send_approved(self, draft_id: int) -> None:
+    def send_approved(self, draft_id: int, permit_token: str | None) -> None:
         row = get_reply_draft(self.db, draft_id)
         if row is None:
             raise ValueError(f"draft #{draft_id} not found")
         sender = ApprovedDraftSender(self.cfg, self.db)
-        result = sender.send_draft(row)
+        result = sender.send_draft(row, permit_token=permit_token)
         print(
             "SIGNED SEND VERIFIED\n"
             f"draft=#{result['draft_id']} room={result['room']} "
@@ -1011,6 +1082,11 @@ def main() -> None:
         description="Technocore scout; sending requires an approved draft and explicit command"
     )
     parser.add_argument("--config", default="technoscout.config.json")
+    parser.add_argument(
+        "--permit",
+        default=None,
+        help="one-time send permit token from --arm-send",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--once", action="store_true")
     modes.add_argument("--loop", action="store_true")
@@ -1024,14 +1100,17 @@ def main() -> None:
     modes.add_argument("--sender-status", action="store_true")
     modes.add_argument("--diagnose-seed", action="store_true")
     modes.add_argument("--send-attempts", type=int, metavar="ID")
+    modes.add_argument("--send-permits", type=int, metavar="ID")
+    modes.add_argument("--arm-send", type=int, metavar="ID")
+    modes.add_argument("--disarm-send", type=int, metavar="ID")
     modes.add_argument("--send-approved", type=int, metavar="ID")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     scout = TechnoScout(cfg)
     print(
-        f"TechnoScout v0.6 | default=READ-ONLY | "
-        f"send={'ENABLED' if cfg.get('sending_enabled') else 'disabled'} | "
+        f"TechnoScout v0.7 | default=READ-ONLY | "
+        f"send=ONE-TIME-PERMIT | "
         f"LLM={cfg['llm_backend']} | DB={database_path(cfg)}",
         flush=True,
     )
@@ -1067,8 +1146,23 @@ def main() -> None:
         if args.send_attempts is not None:
             scout.send_attempts_status(args.send_attempts)
             return
+        if args.send_permits is not None:
+            scout.send_permits_status(args.send_permits)
+            return
+        if args.arm_send is not None:
+            scout.arm_send(args.arm_send)
+            return
+        if args.disarm_send is not None:
+            scout.disarm_send(args.disarm_send)
+            return
         if args.send_approved is not None:
-            scout.send_approved(args.send_approved)
+            permit = args.permit
+            if (
+                permit is None
+                and bool(cfg.get("send_permit_required", True))
+            ):
+                permit = getpass.getpass("One-time permit: ")
+            scout.send_approved(args.send_approved, permit)
             return
         if args.once or not args.loop:
             scout.cycle()

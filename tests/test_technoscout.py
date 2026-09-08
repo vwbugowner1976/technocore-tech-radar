@@ -14,7 +14,12 @@ from technoscout.common import (
     safe_room,
 )
 from technoscout.llm_backend import ManagedMLXBackend
-from technoscout.sender import SigningIdentity, diagnose_signing_material, sweep_text
+from technoscout.sender import (
+    ApprovedDraftSender,
+    SigningIdentity,
+    diagnose_signing_material,
+    sweep_text,
+)
 from technoscout.db import (
     agent_context,
     agent_relationship,
@@ -26,6 +31,11 @@ from technoscout.db import (
     record_agent_signal,
     pending_reply_drafts,
     reply_draft_counts,
+    create_send_permit,
+    consume_send_permit,
+    expire_send_permits,
+    revoke_send_permits,
+    send_permits_for_draft,
     reserve_send_nonce,
     create_send_attempt,
     finish_send_attempt,
@@ -229,6 +239,115 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(reply_draft_counts(con)["sent"], 1)
             con.close()
 
+    def test_one_time_send_permit_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            token_hash = "a" * 64
+            permit_id = create_send_permit(
+                con,
+                draft_id=2,
+                created_at=100.0,
+                expires_at=200.0,
+                token_hash=token_hash,
+                did="did:key:test",
+                room="inference-agents",
+                text_hash="b" * 64,
+            )
+            con.commit()
+            self.assertGreater(permit_id, 0)
+            rows = send_permits_for_draft(con, 2)
+            self.assertEqual(rows[0]["status"], "armed")
+
+            self.assertFalse(consume_send_permit(
+                con,
+                draft_id=2,
+                token_hash="c" * 64,
+                did="did:key:test",
+                room="inference-agents",
+                text_hash="b" * 64,
+                now=150.0,
+            ))
+            self.assertTrue(consume_send_permit(
+                con,
+                draft_id=2,
+                token_hash=token_hash,
+                did="did:key:test",
+                room="inference-agents",
+                text_hash="b" * 64,
+                now=150.0,
+            ))
+            self.assertFalse(consume_send_permit(
+                con,
+                draft_id=2,
+                token_hash=token_hash,
+                did="did:key:test",
+                room="inference-agents",
+                text_hash="b" * 64,
+                now=151.0,
+            ))
+            con.commit()
+            self.assertEqual(send_permits_for_draft(con, 2)[0]["status"], "consumed")
+
+            create_send_permit(
+                con,
+                draft_id=3,
+                created_at=100.0,
+                expires_at=120.0,
+                token_hash="d" * 64,
+                did="did:key:test",
+                room="agents",
+                text_hash="e" * 64,
+            )
+            self.assertEqual(expire_send_permits(con, 121.0), 1)
+            con.commit()
+            self.assertEqual(send_permits_for_draft(con, 3)[0]["status"], "expired")
+            con.close()
+
+    def test_arming_supersedes_previous_permit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            create_send_permit(
+                con, 7, 100.0, 200.0, "1" * 64,
+                "did:key:test", "agents", "2" * 64,
+            )
+            create_send_permit(
+                con, 7, 110.0, 210.0, "3" * 64,
+                "did:key:test", "agents", "2" * 64,
+            )
+            con.commit()
+            rows = send_permits_for_draft(con, 7)
+            self.assertEqual(rows[0]["status"], "armed")
+            self.assertEqual(rows[1]["status"], "superseded")
+            con.close()
+
+    def test_send_permit_revocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            create_send_permit(
+                con,
+                draft_id=9,
+                created_at=100.0,
+                expires_at=200.0,
+                token_hash="f" * 64,
+                did="did:key:test",
+                room="agents",
+                text_hash="e" * 64,
+            )
+            self.assertEqual(revoke_send_permits(con, 9), 1)
+            con.commit()
+            row = send_permits_for_draft(con, 9)[0]
+            self.assertEqual(row["status"], "revoked")
+            self.assertFalse(consume_send_permit(
+                con,
+                draft_id=9,
+                token_hash="f" * 64,
+                did="did:key:test",
+                room="agents",
+                text_hash="e" * 64,
+                now=150.0,
+            ))
+            con.close()
+
     def test_draft_review_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             con = connect(Path(tmp) / "test.db")
@@ -379,6 +498,59 @@ class SenderCryptoTests(unittest.TestCase):
         public_key = Ed25519PublicKey.from_public_bytes(decoded[2:])
         raw_sig = base64.urlsafe_b64decode(signature + "==")
         public_key.verify(raw_sig, b"agents|123|hello")
+
+
+class SenderPermitIntegrationTests(unittest.TestCase):
+    def test_sender_requires_and_consumes_one_time_permit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            con = connect(root / "test.db")
+            self.assertTrue(create_reply_draft(
+                con,
+                "2026-09-09T02:00:00+00:00",
+                "inference-agents",
+                123,
+                "did:key:target",
+                50,
+                "technical follow-up",
+                "Could you share the benchmark details?",
+            ))
+            draft_id = int(pending_reply_drafts(con, 1)[0]["id"])
+            self.assertTrue(review_reply_draft(con, draft_id, "approved"))
+            con.commit()
+            draft = get_reply_draft(con, draft_id)
+
+            old = os.environ.get("TECHNOSCOUT_TEST_SEND_SEED")
+            os.environ["TECHNOSCOUT_TEST_SEND_SEED"] = "04" * 32
+            cfg = {
+                "base_url": "https://technocore.chat",
+                "signing_seed_env": "TECHNOSCOUT_TEST_SEND_SEED",
+                "signing_env_file": "",
+                "send_permit_required": True,
+                "send_permit_ttl_seconds": 600,
+                "sender_timeout_seconds": 1,
+                "max_response_bytes": 100000,
+            }
+            try:
+                sender = ApprovedDraftSender(cfg, con)
+                with self.assertRaisesRegex(RuntimeError, "one-time send permit"):
+                    sender.send_draft(draft)
+
+                armed = sender.arm_draft(draft)
+                self.assertTrue(armed["token"])
+                sender._read_server_nonce = lambda room: 0
+                sender._post = lambda room, text, nonce, signature: {"seq": 777}
+                result = sender.send_draft(draft, permit_token=armed["token"])
+                self.assertEqual(result["seq"], 777)
+                self.assertEqual(get_reply_draft(con, draft_id)["status"], "sent")
+                permits = send_permits_for_draft(con, draft_id)
+                self.assertEqual(permits[0]["status"], "consumed")
+            finally:
+                if old is None:
+                    os.environ.pop("TECHNOSCOUT_TEST_SEND_SEED", None)
+                else:
+                    os.environ["TECHNOSCOUT_TEST_SEND_SEED"] = old
+                con.close()
 
 
 class ManagedWorkerTests(unittest.TestCase):

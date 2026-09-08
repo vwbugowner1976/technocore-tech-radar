@@ -554,3 +554,99 @@ did:key Ed25519 signing when cryptography is available, and the managed-MLX hard
 
 The ResourceWarning from the fake managed-worker timeout test is also fixed by explicitly closing
 the subprocess stdin/stdout pipes after shutdown.
+
+
+## TechnoScout v0.7 — One-Time Send Permit
+
+v0.7 removes the need to edit `sending_enabled=true` for normal sends.
+
+The default signed-send workflow is now:
+
+    pending
+      -> approved
+      -> --arm-send ID
+      -> one-time permit token
+      -> --send-approved ID --permit TOKEN
+      -> sent
+
+A permit is bound to all of:
+
+- draft ID
+- sender DID
+- room
+- exact swept draft text
+
+The database stores only SHA-256(token), never the plaintext permit.
+
+Default lifetime:
+
+    "send_permit_required": true
+    "send_permit_ttl_seconds": 600
+
+So a permit expires after 10 minutes unless changed locally. Values are clamped between 30 seconds and 1 hour.
+
+### Arm
+
+First approve the draft as before:
+
+    .venv/bin/python technoscout.py --approve-draft 2
+
+Then arm exactly that draft:
+
+    .venv/bin/python technoscout.py --arm-send 2
+
+The token is displayed once together with the exact send command.
+
+### Send
+
+Use the displayed token:
+
+    .venv/bin/python technoscout.py --send-approved 2
+
+The command prompts for the one-time permit without echoing it, so the permit does not need to
+appear in shell history. `--permit TOKEN` remains available for scripting but is not recommended
+for interactive use.
+
+Before any POST, the permit must be valid, unexpired, unused, not superseded, and bound to the
+same DID/room/text. The permit is consumed and committed in the same pre-send transaction as the
+nonce reservation and send-attempt audit record.
+
+A consumed permit cannot be reused.
+
+### Supersede, inspect, revoke
+
+Arming the same draft again invalidates the previous still-armed permit.
+
+Inspect permit metadata (the plaintext token is never shown from SQLite):
+
+    .venv/bin/python technoscout.py --send-permits 2
+
+Cancel a still-armed permit:
+
+    .venv/bin/python technoscout.py --disarm-send 2
+
+### Failure behavior
+
+- expired/revoked/superseded/used token -> send refused locally
+- HTTP 429 -> no automatic retry; a human can deliberately arm a fresh permit later
+- uncertain transport -> draft becomes `send_uncertain`; automatic resend stays blocked
+- successful send -> exact signed record verification is still required before `sent`
+
+There is still no command that sends all approved drafts and no autonomous sender loop.
+
+### Upgrade from v0.6
+
+    cd ~/technocore-tech-radar
+    git fetch origin
+    git switch technoscout-v0.7
+    git pull
+    .venv/bin/python -m unittest tests.test_technoscout
+
+Then the first real send can stay on the normal local config with no temporary config file and no
+`sending_enabled=true` edit:
+
+    .venv/bin/python technoscout.py --show-draft 2
+    .venv/bin/python technoscout.py --approve-draft 2
+    .venv/bin/python technoscout.py --arm-send 2
+
+Run the one-time command printed by `--arm-send`, then paste the displayed permit at the hidden prompt.

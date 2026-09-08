@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit, approved-draft-only Technocore sender for TechnoScout v0.6."""
+"""One-time-permit Technocore sender for TechnoScout v0.7."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import time
 import unicodedata
@@ -20,7 +21,9 @@ from typing import Any
 
 from .common import room_messages, safe_room
 from .db import (
+    consume_send_permit,
     create_send_attempt,
+    create_send_permit,
     finish_send_attempt,
     get_last_send_attempt,
     reserve_send_nonce,
@@ -295,6 +298,18 @@ class SendUncertain(RuntimeError):
     pass
 
 
+def _permit_hash(token: str) -> str:
+    return hashlib.sha256(
+        ("technoscout-send-permit-v1:" + str(token)).encode("utf-8")
+    ).hexdigest()
+
+
+def _draft_text_hash(room: str, text: str) -> str:
+    return hashlib.sha256(
+        ("technoscout-draft-v1\0" + room + "\0" + text).encode("utf-8")
+    ).hexdigest()
+
+
 class ApprovedDraftSender:
     def __init__(self, cfg: dict[str, Any], db: Any) -> None:
         self.cfg = cfg
@@ -310,7 +325,7 @@ class ApprovedDraftSender:
             f"{self.cfg['base_url']}/r/{room}?{query}",
             headers={
                 "Accept": "application/json",
-                "User-Agent": "technoscout-sender/0.6",
+                "User-Agent": "technoscout-sender/0.7",
             },
             method="GET",
         )
@@ -349,7 +364,7 @@ class ApprovedDraftSender:
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "technoscout-sender/0.6",
+                "User-Agent": "technoscout-sender/0.7",
             },
             method="POST",
         )
@@ -394,10 +409,68 @@ class ApprovedDraftSender:
             )
         return matches[-1]
 
-    def send_draft(self, draft: Any) -> dict[str, Any]:
-        if not bool(self.cfg.get("sending_enabled", False)):
+    def arm_draft(self, draft: Any) -> dict[str, Any]:
+        if str(draft["status"]) != "approved":
             raise RuntimeError(
-                "sending is disabled; set sending_enabled=true in the local config"
+                f"draft #{draft['id']} must be approved before arming "
+                f"(current={draft['status']})"
+            )
+        room = safe_room(draft["room"])
+        if not room:
+            raise ValueError("draft room is invalid")
+        text = sweep_text(str(draft["draft_text"]))
+
+        previous = get_last_send_attempt(self.db, int(draft["id"]))
+        if previous is not None and str(previous["status"]) in {
+            "sent",
+            "uncertain",
+            "reserved",
+        }:
+            raise RuntimeError(
+                f"draft #{draft['id']} already has a {previous['status']} send attempt; "
+                "arming is blocked"
+            )
+
+        token = secrets.token_urlsafe(18)
+        now = time.time()
+        ttl = max(30, min(
+            3600,
+            int(self.cfg.get("send_permit_ttl_seconds", 600)),
+        ))
+        expires_at = now + ttl
+        create_send_permit(
+            self.db,
+            draft_id=int(draft["id"]),
+            created_at=now,
+            expires_at=expires_at,
+            token_hash=_permit_hash(token),
+            did=self.identity.did,
+            room=room,
+            text_hash=_draft_text_hash(room, text),
+        )
+        self.db.commit()
+        return {
+            "draft_id": int(draft["id"]),
+            "room": room,
+            "did": self.identity.did,
+            "token": token,
+            "ttl_seconds": ttl,
+            "expires_at": expires_at,
+        }
+
+    def send_draft(
+        self,
+        draft: Any,
+        permit_token: str | None = None,
+    ) -> dict[str, Any]:
+        permit_required = bool(self.cfg.get("send_permit_required", True))
+        if permit_required and not str(permit_token or "").strip():
+            raise RuntimeError(
+                "one-time send permit is required; run --arm-send ID first"
+            )
+        if not permit_required and not bool(self.cfg.get("sending_enabled", False)):
+            raise RuntimeError(
+                "sending is disabled; enable the legacy gate or use one-time permits"
             )
         if str(draft["status"]) != "approved":
             raise RuntimeError(
@@ -422,6 +495,25 @@ class ApprovedDraftSender:
             )
 
         server_nonce = self._read_server_nonce(room)
+
+        if permit_required:
+            now = time.time()
+            consumed = consume_send_permit(
+                self.db,
+                draft_id=int(draft["id"]),
+                token_hash=_permit_hash(str(permit_token).strip()),
+                did=self.identity.did,
+                room=room,
+                text_hash=_draft_text_hash(room, text),
+                now=now,
+            )
+            if not consumed:
+                self.db.rollback()
+                raise RuntimeError(
+                    "send permit is invalid, expired, already used, superseded, "
+                    "or bound to different draft content"
+                )
+
         nonce = reserve_send_nonce(
             self.db,
             self.identity.did,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite persistence for TechnoScout v0.6."""
+"""SQLite persistence for TechnoScout v0.7."""
 
 from __future__ import annotations
 
@@ -113,6 +113,21 @@ CREATE TABLE IF NOT EXISTS send_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_send_attempts_draft
     ON send_attempts(draft_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS send_permits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    did TEXT NOT NULL,
+    room TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'armed',
+    consumed_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_send_permits_draft
+    ON send_permits(draft_id, id DESC);
 """
 
 
@@ -555,3 +570,121 @@ def send_attempts_for_draft(
         """,
         (int(draft_id), max(1, int(limit))),
     ).fetchall()
+
+
+
+def create_send_permit(
+    con: sqlite3.Connection,
+    draft_id: int,
+    created_at: float,
+    expires_at: float,
+    token_hash: str,
+    did: str,
+    room: str,
+    text_hash: str,
+) -> int:
+    # Arming a new permit invalidates any older still-armed permit for the draft.
+    con.execute(
+        """
+        UPDATE send_permits
+        SET status='superseded'
+        WHERE draft_id=? AND status='armed'
+        """,
+        (int(draft_id),),
+    )
+    cur = con.execute(
+        """
+        INSERT INTO send_permits(
+          draft_id,created_at,expires_at,token_hash,did,room,text_hash,status
+        ) VALUES(?,?,?,?,?,?,?,'armed')
+        """,
+        (
+            int(draft_id),
+            float(created_at),
+            float(expires_at),
+            str(token_hash),
+            str(did)[:240],
+            str(room)[:80],
+            str(text_hash),
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def consume_send_permit(
+    con: sqlite3.Connection,
+    draft_id: int,
+    token_hash: str,
+    did: str,
+    room: str,
+    text_hash: str,
+    now: float,
+) -> bool:
+    cur = con.execute(
+        """
+        UPDATE send_permits
+        SET status='consumed', consumed_at=?
+        WHERE draft_id=?
+          AND token_hash=?
+          AND did=?
+          AND room=?
+          AND text_hash=?
+          AND status='armed'
+          AND expires_at>=?
+        """,
+        (
+            float(now),
+            int(draft_id),
+            str(token_hash),
+            str(did)[:240],
+            str(room)[:80],
+            str(text_hash),
+            float(now),
+        ),
+    )
+    return cur.rowcount == 1
+
+
+def expire_send_permits(con: sqlite3.Connection, now: float) -> int:
+    cur = con.execute(
+        """
+        UPDATE send_permits
+        SET status='expired'
+        WHERE status='armed' AND expires_at<?
+        """,
+        (float(now),),
+    )
+    return int(cur.rowcount)
+
+
+def send_permits_for_draft(
+    con: sqlite3.Connection,
+    draft_id: int,
+    limit: int = 10,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT id,draft_id,created_at,expires_at,did,room,text_hash,status,consumed_at
+        FROM send_permits
+        WHERE draft_id=?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (int(draft_id), max(1, int(limit))),
+    ).fetchall()
+
+
+
+def revoke_send_permits(
+    con: sqlite3.Connection,
+    draft_id: int,
+) -> int:
+    cur = con.execute(
+        """
+        UPDATE send_permits
+        SET status='revoked'
+        WHERE draft_id=? AND status='armed'
+        """,
+        (int(draft_id),),
+    )
+    return int(cur.rowcount)
