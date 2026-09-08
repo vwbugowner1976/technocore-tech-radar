@@ -221,3 +221,50 @@ def top_agents(con: sqlite3.Connection, limit: int = 10) -> list[sqlite3.Row]:
         """,
         (max(1, int(limit)),),
     ).fetchall()
+
+
+
+def agent_context(
+    con: sqlite3.Connection,
+    agent_ids: Iterable[str],
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    ids = sorted({str(x)[:240] for x in agent_ids if str(x).strip()})
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    rows = con.execute(
+        f"""
+        SELECT agent_id, encounter_count, useful_signal_count, followup_count, last_room
+        FROM agents
+        WHERE agent_id IN ({placeholders})
+        ORDER BY useful_signal_count DESC, followup_count DESC, encounter_count DESC
+        LIMIT ?
+        """,
+        (*ids, max(1, int(limit))),
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        topics = [
+            str(item["topic"])
+            for item in con.execute(
+                """
+                SELECT topic FROM agent_topics
+                WHERE agent_id=?
+                ORDER BY hit_count DESC, last_seen DESC
+                LIMIT 3
+                """,
+                (row["agent_id"],),
+            ).fetchall()
+        ]
+        result.append(
+            {
+                "id": str(row["agent_id"])[:120],
+                "encounters": int(row["encounter_count"]),
+                "signals": int(row["useful_signal_count"]),
+                "followups": int(row["followup_count"]),
+                "last_room": str(row["last_room"])[:60],
+                "topics": topics,
+            }
+        )
+    return result
