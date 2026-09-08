@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for TechnoScout v0.1.2."""
+"""Shared helpers for TechnoScout v0.1.3."""
 
 from __future__ import annotations
 
@@ -155,14 +155,19 @@ def parse_json_object(text: str) -> dict[str, Any]:
     raise LLMJsonError(len(text), _response_shape(text), repaired=False)
 
 
-def _chat_content(cfg: dict[str, Any], payload: dict[str, Any]) -> str:
+def _chat_content(
+    cfg: dict[str, Any],
+    payload: dict[str, Any],
+    timeout_seconds: float | None = None,
+) -> str:
     request = urllib.request.Request(
         cfg["llm_base_url"] + "/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=float(cfg["llm_timeout_seconds"])) as response:
+    timeout = float(timeout_seconds if timeout_seconds is not None else cfg["llm_timeout_seconds"])
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = json.loads(response.read(int(cfg["max_response_bytes"])).decode("utf-8"))
     try:
         return str(raw["choices"][0]["message"]["content"])
@@ -223,9 +228,16 @@ def local_llm_json(
             },
         ],
     }
-    repaired = _chat_content(cfg, repair_payload)
+    repair_timeout = min(
+        float(cfg["llm_timeout_seconds"]),
+        float(cfg.get("llm_json_repair_timeout_seconds", 60)),
+    )
+    print(f"[llm-json] repair start timeout={repair_timeout:.0f}s", flush=True)
+    repaired = _chat_content(cfg, repair_payload, timeout_seconds=repair_timeout)
     try:
-        return parse_json_object(repaired)
+        value = parse_json_object(repaired)
+        print("[llm-json] repair OK", flush=True)
+        return value
     except LLMJsonError as second:
         raise LLMJsonError(
             second.response_chars,
