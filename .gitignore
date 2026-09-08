@@ -28,3 +28,8 @@ radar/
 sign.py
 __pycache__/
 *.pyc
+
+# TechnoScout local state
+technoscout.config.json
+data/
+logs/
