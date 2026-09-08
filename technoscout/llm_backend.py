@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM backends for TechnoScout v0.4."""
+"""LLM backends for TechnoScout v0.6."""
 
 from __future__ import annotations
 
@@ -164,6 +164,16 @@ class ManagedMLXBackend(LLMBackend):
             raise RuntimeError(f"managed MLX worker exited unexpectedly code={code}")
         return line.rstrip("\n")
 
+    @staticmethod
+    def _close_process_pipes(proc: subprocess.Popen[str]) -> None:
+        for stream in (proc.stdin, proc.stdout):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except Exception:
+                pass
+
     def _terminate(self, reason: str) -> None:
         proc = self.proc
         self.proc = None
@@ -179,32 +189,37 @@ class ManagedMLXBackend(LLMBackend):
             flush=True,
         )
         try:
-            pgid = os.getpgid(pid)
-        except ProcessLookupError:
-            pgid = None
+            try:
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                pgid = None
 
-        grace = max(0.1, float(self.cfg.get("mlx_worker_kill_grace_seconds", 2)))
-        try:
-            if pgid is not None:
-                os.killpg(pgid, signal.SIGTERM)
-            else:
-                proc.terminate()
-            proc.wait(timeout=grace)
-            return
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            pass
-
-        try:
-            if pgid is not None:
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
+            grace = max(
+                0.1,
+                float(self.cfg.get("mlx_worker_kill_grace_seconds", 2)),
+            )
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    proc.terminate()
+                proc.wait(timeout=grace)
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
+                try:
+                    if pgid is not None:
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            self._close_process_pipes(proc)
 
     def _start(self, model: str) -> None:
         if (
