@@ -59,6 +59,7 @@
   "retriage_selected_limit": 100,
   "sending_enabled": false,
   "signing_seed_env": "SIGN_SEED",
+  "signing_env_file": ".env",
   "sender_timeout_seconds": 20,
   "max_response_bytes": 5000000,
   "allow_remote_llm": false
