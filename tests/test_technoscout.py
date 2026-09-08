@@ -275,6 +275,40 @@ class SenderCryptoTests(unittest.TestCase):
                 if old is not None:
                     os.environ["SIGN_SEED"] = old
 
+    def test_base64_pkcs8_seed_round_trip(self):
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        except BaseException:
+            self.skipTest("cryptography is not installed")
+
+        private_key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex("02" * 32))
+        der = private_key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        encoded = base64.b64encode(der).decode("ascii")
+        self.assertEqual(len(encoded), 64)
+
+        old = os.environ.get("TECHNOSCOUT_TEST_B64")
+        os.environ["TECHNOSCOUT_TEST_B64"] = encoded
+        try:
+            identity = SigningIdentity.from_env("TECHNOSCOUT_TEST_B64")
+        finally:
+            if old is None:
+                os.environ.pop("TECHNOSCOUT_TEST_B64", None)
+            else:
+                os.environ["TECHNOSCOUT_TEST_B64"] = old
+
+        expected = SigningIdentity(
+            seed=bytes.fromhex("02" * 32),
+            did=identity.did,
+        )
+        self.assertEqual(identity.seed, expected.seed)
+        signature = identity.sign("agents", 7, "hello")
+        self.assertEqual(len(signature), 86)
+
     def test_signing_identity_round_trip(self):
         try:
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
