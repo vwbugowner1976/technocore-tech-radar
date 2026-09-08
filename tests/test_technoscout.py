@@ -26,6 +26,10 @@ from technoscout.db import (
     record_agent_signal,
     pending_reply_drafts,
     reply_draft_counts,
+    create_send_permit,
+    consume_send_permit,
+    expire_send_permits,
+    send_permits_for_draft,
     reserve_send_nonce,
     create_send_attempt,
     finish_send_attempt,
@@ -227,6 +231,87 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(attempt["nonce"], "501")
             self.assertEqual(get_reply_draft(con, draft_id)["status"], "sent")
             self.assertEqual(reply_draft_counts(con)["sent"], 1)
+            con.close()
+
+    def test_one_time_send_permit_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            token_hash = "a" * 64
+            permit_id = create_send_permit(
+                con,
+                draft_id=2,
+                created_at=100.0,
+                expires_at=200.0,
+                token_hash=token_hash,
+                did="did:key:test",
+                room="inference-agents",
+                text_hash="b" * 64,
+            )
+            con.commit()
+            self.assertGreater(permit_id, 0)
+            rows = send_permits_for_draft(con, 2)
+            self.assertEqual(rows[0]["status"], "armed")
+
+            self.assertFalse(consume_send_permit(
+                con,
+                draft_id=2,
+                token_hash="c" * 64,
+                did="did:key:test",
+                room="inference-agents",
+                text_hash="b" * 64,
+                now=150.0,
+            ))
+            self.assertTrue(consume_send_permit(
+                con,
+                draft_id=2,
+                token_hash=token_hash,
+                did="did:key:test",
+                room="inference-agents",
+                text_hash="b" * 64,
+                now=150.0,
+            ))
+            self.assertFalse(consume_send_permit(
+                con,
+                draft_id=2,
+                token_hash=token_hash,
+                did="did:key:test",
+                room="inference-agents",
+                text_hash="b" * 64,
+                now=151.0,
+            ))
+            con.commit()
+            self.assertEqual(send_permits_for_draft(con, 2)[0]["status"], "consumed")
+
+            create_send_permit(
+                con,
+                draft_id=3,
+                created_at=100.0,
+                expires_at=120.0,
+                token_hash="d" * 64,
+                did="did:key:test",
+                room="agents",
+                text_hash="e" * 64,
+            )
+            self.assertEqual(expire_send_permits(con, 121.0), 1)
+            con.commit()
+            self.assertEqual(send_permits_for_draft(con, 3)[0]["status"], "expired")
+            con.close()
+
+    def test_arming_supersedes_previous_permit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            create_send_permit(
+                con, 7, 100.0, 200.0, "1" * 64,
+                "did:key:test", "agents", "2" * 64,
+            )
+            create_send_permit(
+                con, 7, 110.0, 210.0, "3" * 64,
+                "did:key:test", "agents", "2" * 64,
+            )
+            con.commit()
+            rows = send_permits_for_draft(con, 7)
+            self.assertEqual(rows[0]["status"], "armed")
+            self.assertEqual(rows[1]["status"], "superseded")
             con.close()
 
     def test_draft_review_gate(self):
