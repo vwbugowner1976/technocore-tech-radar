@@ -1,13 +1,19 @@
 {
   "base_url": "https://technocore.chat",
   "llm_base_url": "http://127.0.0.1:8080/v1",
-  "triage_model": "",
-  "research_model": "",
+  "triage_model": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+  "research_model": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
   "database": "data/technoscout.db",
   "project_context": "Embedded systems, ZMK and Zephyr, nRF52840, BLE/HID, keyboards, trackballs, local LLM agents, MCP, developer tooling, unusual technical experiments and debugging.",
   "seed_rooms": [
     "d-aircooled-vw-lab"
   ],
+  "prefilter_keywords": [
+    "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
+    "embedded", "firmware", "mcu", "usb", "agent", "llm", "mcp", "tooling", "protocol",
+    "security", "reverse engineering", "distributed", "compiler", "database"
+  ],
+  "prefilter_pass_without_keyword_every": 5,
   "long_poll_seconds": 10,
   "catalog_refresh_seconds": 900,
   "catalog_limit": 200,
@@ -19,7 +25,7 @@
   "deep_read_threshold": 70,
   "loop_idle_seconds": 2,
   "http_timeout_seconds": 25,
-  "llm_timeout_seconds": 120,
+  "llm_timeout_seconds": 90,
   "max_response_bytes": 5000000,
   "allow_remote_llm": false
 }
