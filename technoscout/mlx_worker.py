@@ -43,6 +43,7 @@ def main() -> None:
         raw_line = raw_line.strip()
         if not raw_line:
             continue
+        request: dict[str, Any] = {}
         try:
             request = json.loads(raw_line)
             if request.get("op") == "shutdown":
