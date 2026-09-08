@@ -229,6 +229,7 @@ class ApprovedDraftSender:
         if previous is not None and str(previous["status"]) in {
             "sent",
             "uncertain",
+            "reserved",
         }:
             raise RuntimeError(
                 f"draft #{draft['id']} already has a {previous['status']} send attempt; "
