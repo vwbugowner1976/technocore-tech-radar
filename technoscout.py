@@ -27,7 +27,14 @@ from technoscout.common import (
     technocore_json,
     utc_now,
 )
-from technoscout.db import (\n    connect,\n    get_meta,\n    record_agent_encounter,\n    record_agent_signal,\n    set_meta,\n    top_agents,\n)\n
+from technoscout.db import (
+    connect,
+    get_meta,
+    record_agent_encounter,
+    record_agent_signal,
+    set_meta,
+    top_agents,
+)
 ROOT = Path(__file__).resolve().parent
 
 TRIAGE_PROMPT = """
