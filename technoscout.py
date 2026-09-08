@@ -29,7 +29,11 @@ from technoscout.common import (
     utc_now,
 )
 from technoscout.llm_backend import create_llm_backend
-from technoscout.sender import ApprovedDraftSender, SigningIdentity
+from technoscout.sender import (
+    ApprovedDraftSender,
+    SigningIdentity,
+    diagnose_signing_material,
+)
 from technoscout.db import (
     agent_context,
     agent_relationship,
@@ -897,6 +901,55 @@ class TechnoScout:
             flush=True,
         )
 
+    def diagnose_seed(self) -> None:
+        env_name = str(self.cfg.get("signing_seed_env", "SIGN_SEED"))
+        env_file = str(self.cfg.get("signing_env_file", ".env"))
+        value = ""
+        source = ""
+        if __import__("os").environ.get(env_name):
+            value = __import__("os").environ[env_name]
+            source = "environment"
+        else:
+            try:
+                value = SigningIdentity._seed_from_file(env_name, env_file)
+                source = env_file
+            except Exception as exc:
+                print(
+                    f"Signing material diagnostics unavailable: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                return
+        if not value:
+            print(f"No {env_name} found in environment or {env_file}", flush=True)
+            return
+        try:
+            result = diagnose_signing_material(value)
+        except Exception as exc:
+            print(
+                f"Signing material diagnostics failed: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return
+
+        print(
+            f"Signing Material Diagnostics | source={source} | "
+            f"chars={result['chars']} | hex64={result['hex64']} | "
+            f"base64_standard={result['base64_standard']} | "
+            f"base64_urlsafe={result['base64_urlsafe']} | "
+            f"decoded_lengths={result['decoded_lengths']} | "
+            f"pkcs8_ed25519={result['pkcs8_ed25519']}",
+            flush=True,
+        )
+        candidates = result.get("candidate_dids", {})
+        if not candidates:
+            print("candidate_dids=none", flush=True)
+            return
+        print("Candidate public DIDs (secret not shown):", flush=True)
+        for label, did in candidates.items():
+            print(f"  {label}: {did}", flush=True)
+
     def sender_status(self) -> None:
         env_name = str(self.cfg.get("signing_seed_env", "SIGN_SEED"))
         enabled = bool(self.cfg.get("sending_enabled", False))
@@ -969,6 +1022,7 @@ def main() -> None:
     modes.add_argument("--approve-draft", type=int, metavar="ID")
     modes.add_argument("--reject-draft", type=int, metavar="ID")
     modes.add_argument("--sender-status", action="store_true")
+    modes.add_argument("--diagnose-seed", action="store_true")
     modes.add_argument("--send-attempts", type=int, metavar="ID")
     modes.add_argument("--send-approved", type=int, metavar="ID")
     args = parser.parse_args()
@@ -1006,6 +1060,9 @@ def main() -> None:
             return
         if args.sender_status:
             scout.sender_status()
+            return
+        if args.diagnose_seed:
+            scout.diagnose_seed()
             return
         if args.send_attempts is not None:
             scout.send_attempts_status(args.send_attempts)
