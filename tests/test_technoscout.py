@@ -4,7 +4,13 @@ import time
 import unittest
 from pathlib import Path
 
-from technoscout.common import clamp_score, event_room, parse_json_object, safe_room
+from technoscout.common import (
+    clamp_score,
+    event_room,
+    normalize_evidence_source,
+    parse_json_object,
+    safe_room,
+)
 from technoscout.llm_backend import ManagedMLXBackend
 from technoscout.db import (
     agent_context,
@@ -12,9 +18,12 @@ from technoscout.db import (
     connect,
     create_reply_draft,
     get_meta,
+    get_reply_draft,
     record_agent_encounter,
     record_agent_signal,
     pending_reply_drafts,
+    reply_draft_counts,
+    review_reply_draft,
     set_meta,
     top_agents,
 )
@@ -44,6 +53,12 @@ class CommonTests(unittest.TestCase):
         value = parse_json_object(sample)
         self.assertEqual(value["relevance"], 88)
         self.assertEqual(value["action"], "SAVE")
+
+    def test_evidence_source_normalization(self):
+        self.assertEqual(normalize_evidence_source("topic"), "topic")
+        self.assertEqual(normalize_evidence_source("MESSAGES"), "messages")
+        self.assertEqual(normalize_evidence_source("topic|messages|none"), "none")
+        self.assertEqual(normalize_evidence_source(None), "none")
 
     def test_score_clamp(self):
         self.assertEqual(clamp_score(101), 100)
@@ -133,6 +148,34 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(len(drafts), 1)
             self.assertEqual(drafts[0]["room"], "agents")
             self.assertEqual(drafts[0]["status"], "pending")
+            con.close()
+
+    def test_draft_review_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            self.assertTrue(create_reply_draft(
+                con,
+                "2026-09-09T00:00:00+00:00",
+                "agents",
+                99,
+                "did:key:review-agent",
+                40,
+                "Useful follow-up",
+                "Could you share how you validated the implementation?",
+            ))
+            con.commit()
+            draft = pending_reply_drafts(con, 5)[0]
+            draft_id = int(draft["id"])
+            self.assertTrue(review_reply_draft(con, draft_id, "approved"))
+            con.commit()
+            reviewed = get_reply_draft(con, draft_id)
+            self.assertEqual(reviewed["status"], "approved")
+            self.assertFalse(review_reply_draft(con, draft_id, "rejected"))
+            counts = reply_draft_counts(con)
+            self.assertEqual(counts["approved"], 1)
+            self.assertEqual(counts["pending"], 0)
+            with self.assertRaises(ValueError):
+                review_reply_draft(con, draft_id, "sent")
             con.close()
 
 
