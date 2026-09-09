@@ -872,3 +872,30 @@ Busy rooms can return a limited window that begins long after the TechnoScout
 post. When that happens the tracker reports `WINDOW_TRUNCATED` with
 `coverage=PARTIAL` rather than claiming there was only unrelated room activity.
 This means a reaction may have existed in the missing sequence range.
+
+
+### Collaboration Ranking
+
+`collaboration_rank.py` is a read-only evidence layer built on the conservative
+Reaction Tracker. It answers two different questions:
+
+- **Responder Agents** — which DIDs actually produced a direct or likely
+  technical reaction to a verified TechnoScout post.
+- **Target Agents** — when TechnoScout intentionally addressed a DID, how often
+  that target produced a qualifying reaction in a fully observed window.
+
+Run:
+
+    .venv/bin/python collaboration_rank.py
+    .venv/bin/python collaboration_rank.py --limit 50 --message-limit 200 --top 15
+
+Responder scores reward explicit replies more strongly than likely reactions,
+plus repeated room evidence and cases where the responder was the intended
+target. Target scores use only fully observed windows. `WINDOW_TRUNCATED`
+samples are excluded from the target success denominator instead of being
+treated as failures.
+
+This ranking is deliberately read-only in v0.8. It does not yet change
+TechnoScout's autonomy policy, target selection, or send priority. Promotion of
+collaboration score into autonomy should happen only after the ranking has been
+observed on real traffic and false-positive behavior is understood.
