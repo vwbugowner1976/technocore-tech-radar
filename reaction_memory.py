@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Callable
 
 from reaction_tracker import (
     classify_reaction,
@@ -46,12 +47,117 @@ def sent_rows(con: Any, limit: int) -> list[Any]:
     ).fetchall()
 
 
+def _parse_iso(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def reaction_check_due(
+    *,
+    attempted_at: str,
+    last_checked_at: str,
+    classification: str,
+    now: datetime,
+    max_age_seconds: int = 86400,
+) -> bool:
+    """Return whether a verified send should be rechecked automatically."""
+    attempted = _parse_iso(attempted_at)
+    checked = _parse_iso(last_checked_at)
+    now = now.astimezone(timezone.utc)
+
+    # Never auto-recheck an explicit direct reply: it is terminal evidence.
+    if str(classification).upper() == "DIRECT_REPLY":
+        return False
+
+    # Unsynced sends get one initial check even if they predate the normal
+    # tracking horizon. This makes upgrades safe for existing databases.
+    if not str(last_checked_at or "").strip():
+        return True
+
+    if attempted is None or checked is None:
+        return True
+
+    send_age = max(0.0, (now - attempted).total_seconds())
+    if send_age > max(60, int(max_age_seconds)):
+        return False
+
+    checked_age = max(0.0, (now - checked).total_seconds())
+
+    # Follow fresh posts closely so busy rooms do not push an immediate reply
+    # out of the 200-message window. Back off as the post ages.
+    if send_age <= 15 * 60:
+        interval = 60
+    elif send_age <= 2 * 60 * 60:
+        interval = 5 * 60
+    else:
+        interval = 30 * 60
+
+    return checked_age >= interval
+
+
+def due_sent_rows(
+    con: Any,
+    *,
+    limit: int,
+    now: datetime,
+    max_age_seconds: int = 86400,
+) -> list[Any]:
+    scan_limit = max(50, max(1, int(limit)) * 12)
+    rows = con.execute(
+        """
+        SELECT
+          s.id AS attempt_id,
+          s.draft_id,
+          s.room,
+          s.did,
+          s.text,
+          s.detail,
+          s.attempted_at,
+          d.target_agent,
+          rm.classification AS memory_classification,
+          rm.last_checked_at AS memory_last_checked_at
+        FROM send_attempts s
+        JOIN reply_drafts d ON d.id=s.draft_id
+        LEFT JOIN reaction_memory rm ON rm.send_attempt_id=s.id
+        WHERE s.status='sent'
+        ORDER BY s.id DESC
+        LIMIT ?
+        """,
+        (scan_limit,),
+    ).fetchall()
+
+    due = []
+    for row in rows:
+        if reaction_check_due(
+            attempted_at=str(row["attempted_at"]),
+            last_checked_at=str(row["memory_last_checked_at"] or ""),
+            classification=str(row["memory_classification"] or ""),
+            now=now,
+            max_age_seconds=max_age_seconds,
+        ):
+            due.append(row)
+            if len(due) >= max(1, int(limit)):
+                break
+    return due
+
+
 def sync_reaction_memory(
     con: Any,
     cfg: dict[str, Any],
     *,
     limit: int = 50,
     message_limit: int = 200,
+    rows: list[Any] | None = None,
+    verbose: bool = True,
+    fetcher: Callable[[dict[str, Any], str, int, int], list[dict[str, Any]]] | None = None,
 ) -> dict[str, int]:
     self_dids = known_self_dids(con, cfg)
     stats = {
@@ -63,7 +169,10 @@ def sync_reaction_memory(
         "read_error": 0,
     }
 
-    for row in sent_rows(con, limit):
+    work_rows = rows if rows is not None else sent_rows(con, limit)
+    room_fetcher = fetcher or fetch_room_after
+
+    for row in work_rows:
         our_seq = sent_seq(str(row["detail"]))
         if our_seq is None:
             stats["no_seq"] += 1
@@ -74,7 +183,7 @@ def sync_reaction_memory(
         checked_at = utc_now()
 
         try:
-            messages = fetch_room_after(
+            messages = room_fetcher(
                 cfg,
                 room,
                 our_seq,
@@ -125,18 +234,63 @@ def sync_reaction_memory(
         stats["checked"] += 1
         stats[action] += 1
 
-        print(
-            f"[reaction-memory] draft=#{row['draft_id']} room={room} "
-            f"seq={our_seq} class={classification} coverage={coverage} "
-            f"action={action}"
-            + (
-                f" responder={responder_did[:30]} responder_seq={responder_seq}"
-                if responder_did
-                else ""
-            ),
-            flush=True,
-        )
+        if verbose:
+            print(
+                f"[reaction-memory] draft=#{row['draft_id']} room={room} "
+                f"seq={our_seq} class={classification} coverage={coverage} "
+                f"action={action}"
+                + (
+                    f" responder={responder_did[:30]} responder_seq={responder_seq}"
+                    if responder_did
+                    else ""
+                ),
+                flush=True,
+            )
 
+    return stats
+
+
+def auto_sync_reaction_memory(
+    con: Any,
+    cfg: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    limit: int = 6,
+    message_limit: int = 200,
+    max_age_seconds: int = 86400,
+    verbose: bool = False,
+    fetcher: Callable[[dict[str, Any], str, int, int], list[dict[str, Any]]] | None = None,
+) -> dict[str, int]:
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    rows = due_sent_rows(
+        con,
+        limit=max(1, int(limit)),
+        now=current,
+        max_age_seconds=max_age_seconds,
+    )
+    stats = {
+        "due": len(rows),
+        "checked": 0,
+        "inserted": 0,
+        "updated": 0,
+        "preserved": 0,
+        "no_seq": 0,
+        "read_error": 0,
+    }
+    if not rows:
+        return stats
+
+    synced = sync_reaction_memory(
+        con,
+        cfg,
+        limit=len(rows),
+        message_limit=max(1, min(200, int(message_limit))),
+        rows=rows,
+        verbose=verbose,
+        fetcher=fetcher,
+    )
+    stats.update(synced)
+    stats["due"] = len(rows)
     return stats
 
 
