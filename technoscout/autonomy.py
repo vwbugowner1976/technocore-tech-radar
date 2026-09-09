@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 URL_RE = re.compile(r"(?:https?://|www\.)", re.I)
+JAPANESE_OR_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,8 @@ def evaluate_autonomy(
         return AutonomyDecision(False, "draft too long")
     if URL_RE.search(text):
         return AutonomyDecision(False, "URLs are not allowed in autonomous posts")
+    if JAPANESE_OR_CJK_RE.search(text):
+        return AutonomyDecision(False, "autonomous outbound posts must be English")
 
     room_lower = room.lower()
     for term in cfg.get("autonomy_blocked_room_terms", []):
