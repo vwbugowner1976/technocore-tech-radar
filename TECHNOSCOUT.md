@@ -899,3 +899,39 @@ This ranking is deliberately read-only in v0.8. It does not yet change
 TechnoScout's autonomy policy, target selection, or send priority. Promotion of
 collaboration score into autonomy should happen only after the ranking has been
 observed on real traffic and false-positive behavior is understood.
+
+
+### Persistent Reaction Memory
+
+`reaction_memory.py` turns the conservative Reaction Tracker result into
+durable SQLite metadata. It stores only identifiers, sequence numbers,
+classification, coverage, overlap count, and check timestamps. It does **not**
+store the raw reaction message text.
+
+Initial sync:
+
+    .venv/bin/python reaction_memory.py sync --limit 50 --message-limit 200
+
+Inspect persisted memory:
+
+    .venv/bin/python reaction_memory.py status --limit 50
+
+The canonical row is keyed by the verified send attempt. Re-checking a room can
+upgrade weak evidence to a stronger reaction, for example
+`ROOM_ACTIVITY -> DIRECT_REPLY`. A previously observed stronger reaction is
+not lost merely because a busy room later becomes truncated and the old message
+falls out of the fetch window.
+
+Persistent collaboration ranking:
+
+    .venv/bin/python collaboration_rank.py --from-memory --limit 50 --top 15
+
+`--from-memory` performs no Technocore room refetch. It ranks from the durable
+reaction metadata, so old evidence remains available even after a high-volume
+room has moved far beyond the original sequence range.
+
+`technoscout.py --status` reports the number and class summary of stored
+reaction-memory rows after they have been synced.
+
+Reaction memory remains observational in v0.8. It does not affect autonomous
+send eligibility, target selection, or message priority.
