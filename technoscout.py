@@ -1344,13 +1344,25 @@ class TechnoScout:
 
     def supersede_stale_pending(self) -> None:
         rows = pending_reply_drafts(self.db, 100000)
+        sent_cutoffs = {
+            (str(row["room"]), str(row["target_agent"])): int(row["max_id"])
+            for row in self.db.execute(
+                """
+                SELECT room,target_agent,MAX(id) AS max_id
+                FROM reply_drafts
+                WHERE status='sent'
+                GROUP BY room,target_agent
+                """
+            ).fetchall()
+        }
         seen: set[tuple[str, str]] = set()
         changed = 0
         for row in rows:
             key = (str(row["room"]), str(row["target_agent"]))
-            if key in seen:
+            draft_id = int(row["id"])
+            if draft_id < sent_cutoffs.get(key, 0) or key in seen:
                 if mark_pending_draft_status(
-                    self.db, int(row["id"]), "superseded"
+                    self.db, draft_id, "superseded"
                 ):
                     changed += 1
             else:
