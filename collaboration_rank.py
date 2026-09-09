@@ -17,6 +17,7 @@ from reaction_tracker import (
     sender_of,
     sent_seq,
 )
+from technoscout.db import connect, reaction_memory_rows
 from technoscout_cli import database_path, load_config
 
 
@@ -178,6 +179,67 @@ def rank_collaboration(
     return responders, targets, dict(totals)
 
 
+def rank_collaboration_memory(
+    rows: list[Any],
+) -> tuple[
+    dict[str, ResponderStats],
+    dict[str, TargetStats],
+    dict[str, int],
+]:
+    responders: dict[str, ResponderStats] = {}
+    targets: dict[str, TargetStats] = {}
+    totals: dict[str, int] = defaultdict(int)
+
+    for row in rows:
+        classification = str(row["classification"])
+        coverage = str(row["coverage"])
+        responder_id = str(row["responder_did"] or "")
+        target_agent = str(row["target_agent"] or "")
+        room = str(row["room"])
+        overlap = int(row["overlap"] or 0)
+
+        totals[classification] += 1
+
+        if target_agent:
+            target = targets.setdefault(
+                target_agent,
+                TargetStats(agent_id=target_agent),
+            )
+            target.sends += 1
+            target.rooms.add(room)
+
+            if coverage == "PARTIAL" or classification == "WINDOW_TRUNCATED":
+                target.partial += 1
+            elif coverage == "ERROR" or classification == "READ_ERROR":
+                target.read_error += 1
+            else:
+                target.observed += 1
+                if classification == "DIRECT_REPLY" and responder_id == target_agent:
+                    target.direct += 1
+                elif classification == "LIKELY_REACTION" and responder_id == target_agent:
+                    target.likely += 1
+                elif classification == "ROOM_ACTIVITY":
+                    target.room_activity += 1
+                elif classification == "NO_REACTION":
+                    target.no_reaction += 1
+
+        if classification in {"DIRECT_REPLY", "LIKELY_REACTION"} and responder_id:
+            responder = responders.setdefault(
+                responder_id,
+                ResponderStats(agent_id=responder_id),
+            )
+            responder.rooms.add(room)
+            responder.overlap_total += overlap
+            if classification == "DIRECT_REPLY":
+                responder.direct += 1
+            else:
+                responder.likely += 1
+            if target_agent and responder_id == target_agent:
+                responder.target_matches += 1
+
+    return responders, targets, dict(totals)
+
+
 def short_did(value: str) -> str:
     text = str(value or "")
     if len(text) <= 28:
@@ -193,28 +255,38 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--message-limit", type=int, default=200)
     parser.add_argument("--top", type=int, default=15)
+    parser.add_argument(
+        "--from-memory",
+        action="store_true",
+        help="rank from persisted reaction_memory instead of refetching rooms",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    con = sqlite3.connect(database_path(cfg))
-    con.row_factory = sqlite3.Row
+    con = connect(database_path(cfg))
     try:
-        rows = sent_rows(con, args.limit)
         self_dids = known_self_dids(con, cfg)
+        if args.from_memory:
+            rows = reaction_memory_rows(con, args.limit)
+            responders, targets, totals = rank_collaboration_memory(rows)
+            source = "memory"
+        else:
+            rows = sent_rows(con, args.limit)
 
-        def fetcher(room: str, seq: int, limit: int) -> list[dict[str, Any]]:
-            return fetch_room_after(cfg, room, seq, limit)
+            def fetcher(room: str, seq: int, limit: int) -> list[dict[str, Any]]:
+                return fetch_room_after(cfg, room, seq, limit)
 
-        responders, targets, totals = rank_collaboration(
-            rows,
-            self_dids=self_dids,
-            message_limit=max(1, min(200, args.message_limit)),
-            fetcher=fetcher,
-        )
+            responders, targets, totals = rank_collaboration(
+                rows,
+                self_dids=self_dids,
+                message_limit=max(1, min(200, args.message_limit)),
+                fetcher=fetcher,
+            )
+            source = "live"
 
         print(
             "Collaboration Ranking | "
-            f"verified_posts={len(rows)} self_dids={len(self_dids)} "
+            f"source={source} verified_posts={len(rows)} self_dids={len(self_dids)} "
             + " ".join(
                 f"{key}={totals.get(key, 0)}"
                 for key in (
