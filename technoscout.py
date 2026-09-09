@@ -437,6 +437,43 @@ def nontrivial_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def progress_only_batch_followup(
+    room: str,
+    messages: list[dict[str, Any]],
+    evidence_seqs: list[int],
+) -> bool:
+    if str(room).lower() != "flop-index":
+        return False
+    evidence = {int(value) for value in evidence_seqs}
+    texts = [
+        str(item.get("text", item.get("message", ""))).lower()
+        for item in messages
+        if not evidence or seq_of(item) in evidence
+    ]
+    if not texts:
+        return False
+    running = any(
+        "analysing" in text or "analyzing" in text
+        for text in texts
+    )
+    result_terms = (
+        "completed",
+        "complete ",
+        "finished",
+        "findings",
+        "top candidate",
+        "ranked",
+        "shortlist",
+        "selected candidate",
+        "results:",
+    )
+    has_result = any(
+        any(term in text for term in result_terms)
+        for text in texts
+    )
+    return running and not has_result
+
+
 class TechnoScout:
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
