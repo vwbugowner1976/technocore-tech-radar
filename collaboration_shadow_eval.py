@@ -120,6 +120,7 @@ def sync_shadow_evaluations(
 ) -> dict[str, int]:
     stats = {
         "checked": 0,
+        "changed": 0,
         "resolved": 0,
         "unresolved": 0,
         "actual_replied": 0,
@@ -127,6 +128,38 @@ def sync_shadow_evaluations(
     }
     for row in collaboration_shadow_rows(con, limit):
         result = evaluate_shadow_row(con, row)
+        existing = con.execute(
+            """
+            SELECT state,send_attempt_id,classification,coverage,
+                   responder_did,actual_target_replied
+            FROM collaboration_shadow_evaluations
+            WHERE decision_id=?
+            """,
+            (int(row["id"]),),
+        ).fetchone()
+        new_signature = (
+            str(result["state"]),
+            result["send_attempt_id"],
+            str(result["classification"]),
+            str(result["coverage"]),
+            str(result["responder_did"]),
+            1 if bool(result["actual_target_replied"]) else 0,
+        )
+        old_signature = (
+            (
+                str(existing["state"]),
+                existing["send_attempt_id"],
+                str(existing["classification"]),
+                str(existing["coverage"]),
+                str(existing["responder_did"]),
+                int(existing["actual_target_replied"]),
+            )
+            if existing is not None
+            else None
+        )
+        if old_signature != new_signature:
+            stats["changed"] += 1
+
         upsert_collaboration_shadow_evaluation(
             con,
             decision_id=int(row["id"]),
