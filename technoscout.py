@@ -1165,7 +1165,8 @@ class TechnoScout:
             f"signals={signals} drafts=p{draft_counts.get('pending',0)}/"
             f"a{draft_counts.get('approved',0)}/r{draft_counts.get('rejected',0)}/"
             f"s{draft_counts.get('sent',0)}/u{draft_counts.get('send_uncertain',0)}/"
-            f"b{draft_counts.get('send_blocked',0)} "
+            f"b{draft_counts.get('autonomy_blocked',0) + draft_counts.get('send_blocked',0)}/"
+            f"x{draft_counts.get('superseded',0)} "
             f"agents={agents} useful_agents={useful_agents}"
         )
         print(f"triage_model={self.triage_model}", flush=True)
@@ -1231,6 +1232,10 @@ class TechnoScout:
             self.db,
             int(self.cfg.get("draft_status_limit", 12)),
         )
+        blocked_total = (
+            counts.get("autonomy_blocked", 0)
+            + counts.get("send_blocked", 0)
+        )
         print(
             "Reply Drafts | "
             f"pending={counts.get('pending',0)} "
@@ -1238,7 +1243,8 @@ class TechnoScout:
             f"rejected={counts.get('rejected',0)} "
             f"sent={counts.get('sent',0)} "
             f"uncertain={counts.get('send_uncertain',0)} "
-            f"blocked={counts.get('send_blocked',0)}"
+            f"blocked={blocked_total} "
+            f"superseded={counts.get('superseded',0)}"
         )
         for row in rows:
             print(
