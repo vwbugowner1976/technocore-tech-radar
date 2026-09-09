@@ -106,7 +106,8 @@ class AutonomyPolicyTests(unittest.TestCase):
                 "governance", "tclk", "offer", "wallet", "payment"
             ],
             "autonomy_blocked_text_terms": [
-                "wallet", "payment", "refund", "private key", "password"
+                "wallet", "payment", "refund", "private key", "password",
+                "transaction", "receipt", "artifact id"
             ],
         }
 
