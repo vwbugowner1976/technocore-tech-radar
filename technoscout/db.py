@@ -899,3 +899,16 @@ def recent_observations(
         """,
         (max(1, int(limit)),),
     ).fetchall()
+
+
+
+def get_autonomy_halt(con: sqlite3.Connection) -> str:
+    return get_meta(con, "autonomy_halt", "")
+
+
+def set_autonomy_halt(con: sqlite3.Connection, reason: str) -> None:
+    set_meta(con, "autonomy_halt", str(reason)[:2000])
+
+
+def clear_autonomy_halt(con: sqlite3.Connection) -> None:
+    con.execute("DELETE FROM meta WHERE key='autonomy_halt'")
