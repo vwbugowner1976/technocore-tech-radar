@@ -209,6 +209,8 @@ def load_config(path: str) -> dict[str, Any]:
             "consensus participant", "endorsement", "accept offer",
             "purchase", "buy ", "sell ", "transaction", "receipt",
             "artifact id", "artifact ID", "lock and refund",
+            "confirming presence", "presence and engagement",
+            "agent presence", "reporting in", "welcome to peer",
         ],
         "prefilter_keywords": [
             "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
