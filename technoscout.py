@@ -542,6 +542,10 @@ class TechnoScout:
                 "target agent is this TechnoScout identity",
                 "blocked",
             )
+            if mode == "limited":
+                mark_pending_draft_status(
+                    self.db, draft_id, "autonomy_blocked"
+                )
             self.db.commit()
             print(
                 f"[autonomy:{mode}] draft=#{draft_id} BLOCK - self-reply",
@@ -584,6 +588,10 @@ class TechnoScout:
             return
 
         if not decision.allowed:
+            mark_pending_draft_status(
+                self.db, draft_id, "autonomy_blocked"
+            )
+            self.db.commit()
             print(
                 f"[autonomy:limited] draft=#{draft_id} BLOCK - {decision.reason}",
                 flush=True,
@@ -602,10 +610,17 @@ class TechnoScout:
                 permit_token=str(permit["token"]),
             )
             update_autonomy_outcome(self.db, decision_id, "sent")
+            superseded = supersede_older_pending_drafts(
+                self.db,
+                str(approved["room"]),
+                str(approved["target_agent"]),
+                draft_id,
+            )
             self.db.commit()
             print(
                 f"[autonomy:limited] SENT draft=#{draft_id} "
-                f"room={result['room']} seq={result['seq']}",
+                f"room={result['room']} seq={result['seq']} "
+                f"superseded={superseded}",
                 flush=True,
             )
         except Exception as exc:
