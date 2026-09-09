@@ -967,3 +967,30 @@ technical reactions, target-response success, and evidence across rooms.
 This shadow layer does not alter draft creation, autonomous eligibility, rate
 limits, room policy, or the signing/send path. Promotion into real target selection
 should wait until enough live observations show that the ranking is reliable.
+
+
+### Persisted Collaboration Shadow History
+
+Shadow target comparisons are now stored in SQLite when TechnoScout has
+reaction evidence for at least one candidate. Each row records the room,
+through-seq, the relationship-only actual target, the collaboration-aware shadow
+target, the scoring inputs, and whether the two choices were `SAME` or
+`WOULD_PREFER`.
+
+No raw room transcript is stored in this table.
+
+Inspect the accumulated comparisons with:
+
+    .venv/bin/python collaboration_shadow_report.py --limit 50
+
+The report links a shadow decision to the real draft/send/reaction outcome when
+that actual draft was later sent and Reaction Memory has been synced. For
+`WOULD_PREFER` rows, the alternative shadow target is explicitly shown as
+`NOT_TESTED`: because it was not actually messaged, TechnoScout must not infer
+that it would have replied.
+
+`technoscout.py --status` now also reports:
+
+    collaboration_shadow=on weight=35% decisions=N same=X would_prefer=Y ...
+
+This history remains observation-only. It does not change the real target.
