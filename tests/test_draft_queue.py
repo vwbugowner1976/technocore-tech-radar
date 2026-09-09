@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from draft_queue import supersede_stale_pending
 from technoscout.db import (
     connect,
     create_reply_draft,
@@ -91,13 +92,9 @@ class DraftQueueTests(unittest.TestCase):
             )
             con.commit()
 
-            sent_cutoff = ids_by_seq[20]
-            for row in pending_reply_drafts(con, 10):
-                if int(row["id"]) < sent_cutoff:
-                    mark_pending_draft_status(
-                        con, int(row["id"]), "superseded"
-                    )
+            changed = supersede_stale_pending(con)
             con.commit()
+            self.assertEqual(changed, 1)
             self.assertEqual(
                 get_reply_draft(con, ids_by_seq[10])["status"],
                 "superseded",
