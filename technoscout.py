@@ -1250,6 +1250,43 @@ class TechnoScout:
                 f"OR --reject-draft {row['id']}"
             )
 
+    def blocked_drafts_status(self) -> None:
+        limit = int(self.cfg.get("draft_status_limit", 12))
+        rows = list(reply_drafts_by_status(
+            self.db, "autonomy_blocked", limit
+        ))
+        rows.extend(reply_drafts_by_status(
+            self.db, "send_blocked", limit
+        ))
+        rows = sorted(rows, key=lambda row: int(row["id"]), reverse=True)[:limit]
+        counts = reply_draft_counts(self.db)
+        print(
+            "Blocked Drafts | "
+            f"autonomy={counts.get('autonomy_blocked',0)} "
+            f"sender={counts.get('send_blocked',0)}"
+        )
+        for row in rows:
+            print(
+                f"\n#{row['id']} status={row['status']} room={row['room']} "
+                f"target={row['target_agent'][:42]}\n"
+                f"reason: {row['reason'][:220]}\n"
+                f"draft: {row['draft_text']}"
+            )
+
+    def superseded_drafts_status(self) -> None:
+        rows = reply_drafts_by_status(
+            self.db,
+            "superseded",
+            int(self.cfg.get("draft_status_limit", 12)),
+        )
+        print(f"Superseded Drafts | count={reply_draft_counts(self.db).get('superseded',0)}")
+        for row in rows:
+            print(
+                f"\n#{row['id']} room={row['room']} "
+                f"target={row['target_agent'][:42]} through_seq={row['through_seq']}\n"
+                f"draft: {row['draft_text']}"
+            )
+
     def show_draft(self, draft_id: int) -> None:
         row = get_reply_draft(self.db, draft_id)
         if row is None:
