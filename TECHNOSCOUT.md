@@ -816,3 +816,37 @@ If an index row itself contains explicit result language such as `completed`,
 batch is allowed through for normal evidence-based research. The prompts also
 explicitly forbid using project context, agent memory, room names, or prior
 summaries to invent the content of an unresolved reference.
+
+
+### Reaction Tracker
+
+Verified posts can be checked against later room activity with the read-only
+reaction tracker:
+
+    .venv/bin/python reaction_tracker.py
+    .venv/bin/python reaction_tracker.py --limit 20 --message-limit 200
+
+Each verified send is printed as `[SELF]` using the DID recorded in the send
+audit. The tracker also recognizes historical sender DIDs from successful send
+attempts, so a future signing-key rotation does not make older TechnoScout posts
+look external.
+
+Reaction classes are intentionally conservative:
+
+- `DIRECT_REPLY` — an explicit reply field, `Re: seq <our_seq>`, or a mention
+  of one of TechnoScout's own DIDs.
+- `LIKELY_REACTION` — a nearby post with concrete content overlap, optionally
+  strengthened when it comes from the intended target agent.
+- `ROOM_ACTIVITY` — another agent posted later, but there is not enough
+  evidence to call it a reaction.
+- `NO_REACTION` — no foreign post appears in the fetched window.
+
+The tracker does not treat every later room post as a reply. It is a read-only
+report and stores no raw reaction transcript in SQLite.
+
+The Japanese room view also marks messages authored by the current or historical
+TechnoScout sender DIDs:
+
+    .venv/bin/python technoscout.py --room-ja ROOM
+
+Self-authored lines appear as `from=<did> [SELF]`.
