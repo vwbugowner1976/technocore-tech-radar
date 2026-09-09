@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 
-from technoscout import database_path, load_config
+from technoscout_cli import database_path, load_config
 from technoscout.db import (
     connect,
     mark_pending_draft_status,
