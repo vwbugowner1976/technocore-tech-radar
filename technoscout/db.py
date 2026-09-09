@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite persistence for TechnoScout v0.7."""
+"""SQLite persistence for TechnoScout v0.8."""
 
 from __future__ import annotations
 
@@ -128,6 +128,30 @@ CREATE TABLE IF NOT EXISTS send_permits (
 );
 CREATE INDEX IF NOT EXISTS idx_send_permits_draft
     ON send_permits(draft_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS translations (
+    source_type TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    language TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    translated_text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(source_type, source_key, language)
+);
+CREATE INDEX IF NOT EXISTS idx_translations_language
+    ON translations(language, source_type);
+
+CREATE TABLE IF NOT EXISTS autonomy_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id INTEGER NOT NULL,
+    decided_at TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    allowed INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    outcome TEXT NOT NULL DEFAULT 'none'
+);
+CREATE INDEX IF NOT EXISTS idx_autonomy_draft
+    ON autonomy_decisions(draft_id, id DESC);
 """
 
 
@@ -688,3 +712,190 @@ def revoke_send_permits(
         (int(draft_id),),
     )
     return int(cur.rowcount)
+
+
+
+def get_translation(
+    con: sqlite3.Connection,
+    source_type: str,
+    source_key: str,
+    language: str,
+    source_hash: str,
+) -> str | None:
+    row = con.execute(
+        """
+        SELECT translated_text, source_hash
+        FROM translations
+        WHERE source_type=? AND source_key=? AND language=?
+        """,
+        (str(source_type), str(source_key), str(language)),
+    ).fetchone()
+    if not row or str(row["source_hash"]) != str(source_hash):
+        return None
+    return str(row["translated_text"])
+
+
+def store_translation(
+    con: sqlite3.Connection,
+    source_type: str,
+    source_key: str,
+    language: str,
+    source_hash: str,
+    translated_text: str,
+    created_at: str,
+) -> None:
+    con.execute(
+        """
+        INSERT INTO translations(
+          source_type,source_key,language,source_hash,translated_text,created_at
+        ) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(source_type,source_key,language) DO UPDATE SET
+          source_hash=excluded.source_hash,
+          translated_text=excluded.translated_text,
+          created_at=excluded.created_at
+        """,
+        (
+            str(source_type),
+            str(source_key),
+            str(language),
+            str(source_hash),
+            str(translated_text)[:6000],
+            str(created_at),
+        ),
+    )
+
+
+def record_autonomy_decision(
+    con: sqlite3.Connection,
+    draft_id: int,
+    decided_at: str,
+    mode: str,
+    allowed: bool,
+    reason: str,
+    outcome: str = "none",
+) -> int:
+    cur = con.execute(
+        """
+        INSERT INTO autonomy_decisions(
+          draft_id,decided_at,mode,allowed,reason,outcome
+        ) VALUES(?,?,?,?,?,?)
+        """,
+        (
+            int(draft_id),
+            str(decided_at),
+            str(mode),
+            1 if allowed else 0,
+            str(reason)[:1000],
+            str(outcome)[:80],
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def update_autonomy_outcome(
+    con: sqlite3.Connection,
+    decision_id: int,
+    outcome: str,
+) -> None:
+    con.execute(
+        "UPDATE autonomy_decisions SET outcome=? WHERE id=?",
+        (str(outcome)[:80], int(decision_id)),
+    )
+
+
+def autonomy_decisions_for_draft(
+    con: sqlite3.Connection,
+    draft_id: int,
+    limit: int = 10,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT id,draft_id,decided_at,mode,allowed,reason,outcome
+        FROM autonomy_decisions
+        WHERE draft_id=?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (int(draft_id), max(1, int(limit))),
+    ).fetchall()
+
+
+def recent_sent_count(
+    con: sqlite3.Connection,
+    since_iso: str,
+) -> int:
+    row = con.execute(
+        """
+        SELECT COUNT(*) n
+        FROM send_attempts
+        WHERE status='sent' AND attempted_at>=?
+        """,
+        (str(since_iso),),
+    ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def last_sent_at_for_room(
+    con: sqlite3.Connection,
+    room: str,
+) -> str:
+    row = con.execute(
+        """
+        SELECT attempted_at
+        FROM send_attempts
+        WHERE status='sent' AND room=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (str(room),),
+    ).fetchone()
+    return str(row["attempted_at"]) if row else ""
+
+
+def last_sent_at_for_agent(
+    con: sqlite3.Connection,
+    agent_id: str,
+) -> str:
+    row = con.execute(
+        """
+        SELECT s.attempted_at
+        FROM send_attempts s
+        JOIN reply_drafts d ON d.id=s.draft_id
+        WHERE s.status='sent' AND d.target_agent=?
+        ORDER BY s.id DESC
+        LIMIT 1
+        """,
+        (str(agent_id),),
+    ).fetchone()
+    return str(row["attempted_at"]) if row else ""
+
+
+def get_reply_draft_by_room_seq(
+    con: sqlite3.Connection,
+    room: str,
+    through_seq: int,
+) -> sqlite3.Row | None:
+    return con.execute(
+        """
+        SELECT id, created_at, room, through_seq, target_agent,
+               relationship_score, reason, draft_text, status
+        FROM reply_drafts
+        WHERE room=? AND through_seq=?
+        """,
+        (str(room), int(through_seq)),
+    ).fetchone()
+
+
+def recent_observations(
+    con: sqlite3.Connection,
+    limit: int = 10,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT id,observed_at,room,relevance,technical,people,action,summary,tags_json
+        FROM observations
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
