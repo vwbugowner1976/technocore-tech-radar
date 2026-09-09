@@ -432,6 +432,59 @@ def pending_reply_drafts(con: sqlite3.Connection, limit: int = 20) -> list[sqlit
 
 
 
+def reply_drafts_by_status(
+    con: sqlite3.Connection,
+    status: str,
+    limit: int = 20,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT id, created_at, room, through_seq, target_agent,
+               relationship_score, reason, draft_text, status
+        FROM reply_drafts
+        WHERE status=?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (str(status), max(1, int(limit))),
+    ).fetchall()
+
+
+def mark_pending_draft_status(
+    con: sqlite3.Connection,
+    draft_id: int,
+    status: str,
+) -> bool:
+    normalized = str(status).strip().lower()
+    if normalized not in {"autonomy_blocked", "superseded"}:
+        raise ValueError("unsupported pending draft status")
+    cur = con.execute(
+        "UPDATE reply_drafts SET status=? WHERE id=? AND status='pending'",
+        (normalized, int(draft_id)),
+    )
+    return cur.rowcount > 0
+
+
+def supersede_older_pending_drafts(
+    con: sqlite3.Connection,
+    room: str,
+    target_agent: str,
+    keep_draft_id: int,
+) -> int:
+    cur = con.execute(
+        """
+        UPDATE reply_drafts
+        SET status='superseded'
+        WHERE status='pending'
+          AND room=?
+          AND target_agent=?
+          AND id<?
+        """,
+        (str(room), str(target_agent), int(keep_draft_id)),
+    )
+    return int(cur.rowcount)
+
+
 def get_reply_draft(con: sqlite3.Connection, draft_id: int) -> sqlite3.Row | None:
     return con.execute(
         """
