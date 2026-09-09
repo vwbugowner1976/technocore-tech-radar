@@ -1146,6 +1146,11 @@ class TechnoScout:
 
     def cycle(self) -> None:
         self.seed()
+        if get_meta(self.db, "draft_queue_cleanup_v1", "") != "done":
+            self.archive_decided_blocks()
+            self.supersede_stale_pending()
+            set_meta(self.db, "draft_queue_cleanup_v1", "done")
+            self.db.commit()
         last_refresh = float(get_meta(self.db, "catalog_refreshed_at", "0") or 0)
         if time.time() - last_refresh >= float(self.cfg["catalog_refresh_seconds"]):
             self.refresh_catalog()
