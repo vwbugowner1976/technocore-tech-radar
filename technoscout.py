@@ -36,8 +36,11 @@ from technoscout.autonomy import evaluate_autonomy
 from technoscout.llm_backend import create_llm_backend
 from technoscout.sender import (
     ApprovedDraftSender,
+    SendRefused,
+    SendUncertain,
     SigningIdentity,
     diagnose_signing_material,
+    is_room_acl_refusal,
 )
 from technoscout.db import (
     agent_context,
@@ -532,6 +535,34 @@ class TechnoScout:
             self.db.commit()
         return translated
 
+    def _learn_room_acl_blocks(self) -> int:
+        rows = self.db.execute(
+            """
+            SELECT room,detail
+            FROM send_attempts
+            WHERE status='refused' AND http_status=403
+            ORDER BY id DESC
+            """
+        ).fetchall()
+        learned = 0
+        for row in rows:
+            room = str(row["room"])
+            detail = str(row["detail"])
+            if not is_room_acl_refusal(403, detail):
+                continue
+            key = f"autonomy_room_acl_block:{room}"
+            if get_meta(self.db, key, ""):
+                continue
+            set_meta(
+                self.db,
+                key,
+                f"HTTP 403 room ACL refusal: {detail[:500]}",
+            )
+            learned += 1
+        if learned:
+            self.db.commit()
+        return learned
+
     def _autonomy_handle_draft(
         self,
         draft_id: int,
@@ -565,6 +596,32 @@ class TechnoScout:
 
         draft = get_reply_draft(self.db, draft_id)
         if draft is None:
+            return
+
+        room_acl_reason = get_meta(
+            self.db,
+            f"autonomy_room_acl_block:{draft['room']}",
+            "",
+        )
+        if room_acl_reason:
+            decision_id = record_autonomy_decision(
+                self.db,
+                draft_id,
+                utc_now(),
+                mode,
+                False,
+                f"room is not writable by this identity: {room_acl_reason}",
+                "blocked",
+            )
+            if mode == "limited":
+                mark_pending_draft_status(
+                    self.db, draft_id, "autonomy_blocked"
+                )
+            self.db.commit()
+            print(
+                f"[autonomy:{mode}] draft=#{draft_id} BLOCK - room ACL",
+                flush=True,
+            )
             return
 
         now_dt = datetime.now(timezone.utc)
@@ -680,6 +737,72 @@ class TechnoScout:
                 f"[autonomy:limited] SENT draft=#{draft_id} "
                 f"room={result['room']} seq={result['seq']} "
                 f"superseded={superseded}",
+                flush=True,
+            )
+        except SendRefused as exc:
+            if is_room_acl_refusal(exc.status, exc.body):
+                set_meta(
+                    self.db,
+                    f"autonomy_room_acl_block:{draft['room']}",
+                    f"HTTP {exc.status}: {exc.body[:500]}",
+                )
+                update_autonomy_outcome(
+                    self.db,
+                    decision_id,
+                    "room_forbidden",
+                )
+                self.db.commit()
+                print(
+                    f"[autonomy:limited] ROOM BLOCK draft=#{draft_id} "
+                    f"room={draft['room']} - identity is not on room allowlist",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+
+            halt_reason = (
+                f"{utc_now()} draft=#{draft_id} "
+                f"SendRefused HTTP {exc.status}: {exc.body[:500]}"
+            )
+            update_autonomy_outcome(
+                self.db,
+                decision_id,
+                f"error:SendRefused:{exc.status}",
+            )
+            set_autonomy_halt(self.db, halt_reason)
+            self.db.commit()
+            print(
+                f"[autonomy:limited] ERROR draft=#{draft_id}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(
+                "[autonomy:limited] GLOBAL HALT engaged. "
+                "Inspect the send attempt before --resume-autonomy.",
+                file=sys.stderr,
+                flush=True,
+            )
+        except SendUncertain as exc:
+            halt_reason = (
+                f"{utc_now()} draft=#{draft_id} "
+                f"SendUncertain: {str(exc)[:500]}"
+            )
+            update_autonomy_outcome(
+                self.db,
+                decision_id,
+                "error:SendUncertain",
+            )
+            set_autonomy_halt(self.db, halt_reason)
+            self.db.commit()
+            print(
+                f"[autonomy:limited] ERROR draft=#{draft_id}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(
+                "[autonomy:limited] GLOBAL HALT engaged. "
+                "Inspect the send attempt before --resume-autonomy.",
+                file=sys.stderr,
                 flush=True,
             )
         except Exception as exc:
@@ -1205,6 +1328,7 @@ class TechnoScout:
 
     def cycle(self) -> None:
         self.seed()
+        self._learn_room_acl_blocks()
         if get_meta(self.db, "draft_queue_cleanup_v1", "") != "done":
             self.archive_decided_blocks()
             self.supersede_stale_pending()
