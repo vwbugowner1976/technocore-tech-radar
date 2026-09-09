@@ -152,6 +152,29 @@ CREATE TABLE IF NOT EXISTS autonomy_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_autonomy_draft
     ON autonomy_decisions(draft_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS reaction_memory (
+    send_attempt_id INTEGER PRIMARY KEY,
+    draft_id INTEGER NOT NULL,
+    first_checked_at TEXT NOT NULL,
+    last_checked_at TEXT NOT NULL,
+    check_count INTEGER NOT NULL DEFAULT 1,
+    room TEXT NOT NULL,
+    our_seq INTEGER NOT NULL,
+    target_agent TEXT NOT NULL DEFAULT '',
+    classification TEXT NOT NULL,
+    coverage TEXT NOT NULL,
+    responder_did TEXT NOT NULL DEFAULT '',
+    responder_seq INTEGER,
+    overlap INTEGER NOT NULL DEFAULT 0,
+    foreign_posts INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_reaction_memory_class
+    ON reaction_memory(classification, last_checked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reaction_memory_responder
+    ON reaction_memory(responder_did, classification);
+CREATE INDEX IF NOT EXISTS idx_reaction_memory_target
+    ON reaction_memory(target_agent, classification);
 """
 
 
@@ -974,3 +997,168 @@ def set_autonomy_halt(con: sqlite3.Connection, reason: str) -> None:
 
 def clear_autonomy_halt(con: sqlite3.Connection) -> None:
     con.execute("DELETE FROM meta WHERE key='autonomy_halt'")
+
+
+REACTION_CLASS_RANK = {
+    "READ_ERROR": 0,
+    "WINDOW_TRUNCATED": 1,
+    "NO_REACTION": 2,
+    "ROOM_ACTIVITY": 3,
+    "LIKELY_REACTION": 4,
+    "DIRECT_REPLY": 5,
+}
+
+
+def get_reaction_memory(
+    con: sqlite3.Connection,
+    send_attempt_id: int,
+) -> sqlite3.Row | None:
+    return con.execute(
+        """
+        SELECT send_attempt_id,draft_id,first_checked_at,last_checked_at,
+               check_count,room,our_seq,target_agent,classification,coverage,
+               responder_did,responder_seq,overlap,foreign_posts
+        FROM reaction_memory
+        WHERE send_attempt_id=?
+        """,
+        (int(send_attempt_id),),
+    ).fetchone()
+
+
+def upsert_reaction_memory(
+    con: sqlite3.Connection,
+    *,
+    send_attempt_id: int,
+    draft_id: int,
+    checked_at: str,
+    room: str,
+    our_seq: int,
+    target_agent: str,
+    classification: str,
+    coverage: str,
+    responder_did: str = "",
+    responder_seq: int | None = None,
+    overlap: int = 0,
+    foreign_posts: int = 0,
+) -> str:
+    """Persist canonical reaction evidence without storing raw message text."""
+    classification = str(classification).upper()
+    if classification not in REACTION_CLASS_RANK:
+        raise ValueError(f"invalid reaction classification: {classification}")
+    coverage = str(coverage).upper()
+    if coverage not in {"OBSERVED", "PARTIAL", "ERROR"}:
+        raise ValueError(f"invalid reaction coverage: {coverage}")
+
+    existing = get_reaction_memory(con, send_attempt_id)
+    if existing is None:
+        con.execute(
+            """
+            INSERT INTO reaction_memory(
+              send_attempt_id,draft_id,first_checked_at,last_checked_at,
+              check_count,room,our_seq,target_agent,classification,coverage,
+              responder_did,responder_seq,overlap,foreign_posts
+            ) VALUES(?,?,?,?,1,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(send_attempt_id),
+                int(draft_id),
+                str(checked_at),
+                str(checked_at),
+                str(room)[:80],
+                int(our_seq),
+                str(target_agent)[:240],
+                classification,
+                coverage,
+                str(responder_did)[:240],
+                int(responder_seq) if responder_seq is not None else None,
+                max(0, int(overlap)),
+                max(0, int(foreign_posts)),
+            ),
+        )
+        return "inserted"
+
+    old_class = str(existing["classification"])
+    old_coverage = str(existing["coverage"])
+    preserve = False
+
+    # Never lose a previously observed stronger reaction merely because a busy
+    # room later becomes truncated or the old reply leaves the fetch window.
+    if old_coverage == "OBSERVED" and coverage != "OBSERVED":
+        preserve = True
+    elif REACTION_CLASS_RANK.get(old_class, 0) > REACTION_CLASS_RANK[classification]:
+        preserve = True
+
+    if preserve:
+        con.execute(
+            """
+            UPDATE reaction_memory
+            SET last_checked_at=?, check_count=check_count+1,
+                foreign_posts=MAX(foreign_posts, ?)
+            WHERE send_attempt_id=?
+            """,
+            (
+                str(checked_at),
+                max(0, int(foreign_posts)),
+                int(send_attempt_id),
+            ),
+        )
+        return "preserved"
+
+    con.execute(
+        """
+        UPDATE reaction_memory
+        SET last_checked_at=?, check_count=check_count+1,
+            draft_id=?,room=?,our_seq=?,target_agent=?,
+            classification=?,coverage=?,responder_did=?,responder_seq=?,
+            overlap=?,foreign_posts=?
+        WHERE send_attempt_id=?
+        """,
+        (
+            str(checked_at),
+            int(draft_id),
+            str(room)[:80],
+            int(our_seq),
+            str(target_agent)[:240],
+            classification,
+            coverage,
+            str(responder_did)[:240],
+            int(responder_seq) if responder_seq is not None else None,
+            max(0, int(overlap)),
+            max(0, int(foreign_posts)),
+            int(send_attempt_id),
+        ),
+    )
+    return "updated"
+
+
+def reaction_memory_rows(
+    con: sqlite3.Connection,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT send_attempt_id,draft_id,first_checked_at,last_checked_at,
+               check_count,room,our_seq,target_agent,classification,coverage,
+               responder_did,responder_seq,overlap,foreign_posts
+        FROM reaction_memory
+        ORDER BY send_attempt_id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+
+def reaction_memory_counts(con: sqlite3.Connection) -> dict[str, int]:
+    result = {
+        "DIRECT_REPLY": 0,
+        "LIKELY_REACTION": 0,
+        "ROOM_ACTIVITY": 0,
+        "WINDOW_TRUNCATED": 0,
+        "NO_REACTION": 0,
+        "READ_ERROR": 0,
+    }
+    for row in con.execute(
+        "SELECT classification,COUNT(*) AS n FROM reaction_memory GROUP BY classification"
+    ).fetchall():
+        result[str(row["classification"])] = int(row["n"])
+    return result
