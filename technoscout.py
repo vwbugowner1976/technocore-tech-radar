@@ -48,6 +48,7 @@ from technoscout.db import (
     agent_relationship,
     autonomy_decisions_for_draft,
     clear_autonomy_halt,
+    collaboration_shadow_counts,
     connect,
     create_reply_draft,
     get_autonomy_halt,
@@ -61,6 +62,7 @@ from technoscout.db import (
     record_agent_encounter,
     record_agent_signal,
     record_autonomy_decision,
+    record_collaboration_shadow_decision,
     pending_reply_drafts,
     recent_observations,
     recent_sent_count,
@@ -1283,6 +1285,41 @@ class TechnoScout:
                                         else "WOULD_PREFER"
                                     )
                                     evidence_info = shadow["evidence"]
+                                    record_collaboration_shadow_decision(
+                                        self.db,
+                                        observed_at=now,
+                                        room=room,
+                                        through_seq=new_last,
+                                        marker=chosen_marker,
+                                        actual_agent=target_agent,
+                                        shadow_agent=str(shadow["agent_id"]),
+                                        actual_relationship=int(
+                                            relationship["score"]
+                                        ),
+                                        shadow_relationship=int(
+                                            shadow["relationship"]
+                                        ),
+                                        shadow_collaboration=int(
+                                            shadow["collaboration"]
+                                        ),
+                                        shadow_combined=int(shadow["combined"]),
+                                        candidate_count=int(
+                                            shadow["candidate_count"]
+                                        ),
+                                        responder_direct=int(
+                                            evidence_info["responder_direct"]
+                                        ),
+                                        responder_likely=int(
+                                            evidence_info["responder_likely"]
+                                        ),
+                                        target_direct=int(
+                                            evidence_info["target_direct"]
+                                        ),
+                                        target_likely=int(
+                                            evidence_info["target_likely"]
+                                        ),
+                                    )
+                                    self.db.commit()
                                     print(
                                         f"[collab-shadow] room={room} "
                                         f"{chosen_marker} "
@@ -1416,6 +1453,11 @@ class TechnoScout:
         reaction_total = self.db.execute(
             "SELECT COUNT(*) n FROM reaction_memory"
         ).fetchone()["n"]
+        shadow_counts = collaboration_shadow_counts(self.db)
+        shadow_total = (
+            shadow_counts.get("SAME", 0)
+            + shadow_counts.get("WOULD_PREFER", 0)
+        )
         print(
             f"TechnoScout v0.8 | rooms={total} selected={selected} pending={pending} "
             f"signals={signals} drafts=p{draft_counts.get('pending',0)}/"
@@ -1473,6 +1515,9 @@ class TechnoScout:
             "collaboration_shadow="
             f"{'on' if self.cfg.get('collaboration_shadow_enabled',True) else 'off'} "
             f"weight={int(self.cfg.get('collaboration_shadow_weight_percent',35))}% "
+            f"decisions={shadow_total} "
+            f"same={shadow_counts.get('SAME',0)} "
+            f"would_prefer={shadow_counts.get('WOULD_PREFER',0)} "
             "(observation only; target selection unchanged)",
             flush=True,
         )
