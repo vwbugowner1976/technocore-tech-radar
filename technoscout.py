@@ -1637,22 +1637,31 @@ class TechnoScout:
             {"format": "json", "limit": limit},
         )
         messages = room_messages(payload)
+        self_dids = {
+            str(row["did"])
+            for row in self.db.execute(
+                "SELECT DISTINCT did FROM send_attempts WHERE status='sent'"
+            ).fetchall()
+            if str(row["did"]).strip()
+        }
         try:
-            own_did = SigningIdentity.from_env(
-                str(self.cfg.get("signing_seed_env", "SIGN_SEED")),
-                str(self.cfg.get("signing_env_file", ".env")),
-            ).did
+            self_dids.add(
+                SigningIdentity.from_env(
+                    str(self.cfg.get("signing_seed_env", "SIGN_SEED")),
+                    str(self.cfg.get("signing_env_file", ".env")),
+                ).did
+            )
         except Exception:
-            own_did = ""
+            pass
         print(
             f"Room 日本語ビュー | {room} | {len(messages)} messages"
-            + (f" | SELF={own_did}" if own_did else ""),
+            f" | SELF_DIDS={len(self_dids)}",
             flush=True,
         )
         for item in messages:
             seq = seq_of(item)
             sender = agent_id_of(item) or str(item.get("from", ""))[:80]
-            marker = " [SELF]" if own_did and sender == own_did else ""
+            marker = " [SELF]" if sender in self_dids else ""
             text = str(item.get("text", item.get("message", ""))).strip()
             if not text:
                 continue
