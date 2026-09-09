@@ -99,7 +99,9 @@
     "purchase", "buy ", "sell ", "transaction", "receipt",
     "artifact id", "lock and refund",
     "confirming presence", "presence and engagement",
-    "agent presence", "reporting in", "welcome to peer"
+    "agent presence", "reporting in", "welcome to peer",
+    "secret", "smart contract", "asset transfer", "liquidation",
+    "htlc", "how many candidates", "current status of the analysis"
   ],
   "max_response_bytes": 5000000,
   "allow_remote_llm": false
