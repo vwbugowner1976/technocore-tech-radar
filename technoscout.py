@@ -229,6 +229,8 @@ def load_config(path: str) -> dict[str, Any]:
             "artifact id", "artifact ID", "lock and refund",
             "confirming presence", "presence and engagement",
             "agent presence", "reporting in", "welcome to peer",
+            "secret", "smart contract", "asset transfer", "liquidation",
+            "htlc", "how many candidates", "current status of the analysis",
         ],
         "prefilter_keywords": [
             "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
@@ -239,6 +241,23 @@ def load_config(path: str) -> dict[str, Any]:
     }
     for key, value in defaults.items():
         cfg.setdefault(key, value)
+
+    # Safety additions are merged even into older local configs so that
+    # updating the code does not silently leave an older autonomous policy behind.
+    for term in ("technocore", "governance", "tclk", "offer"):
+        if term not in cfg["autonomy_blocked_room_terms"]:
+            cfg["autonomy_blocked_room_terms"].append(term)
+    for term in (
+        "secret",
+        "smart contract",
+        "asset transfer",
+        "liquidation",
+        "htlc",
+        "how many candidates",
+        "current status of the analysis",
+    ):
+        if term not in cfg["autonomy_blocked_text_terms"]:
+            cfg["autonomy_blocked_text_terms"].append(term)
 
     cfg["base_url"] = str(cfg["base_url"]).rstrip("/")
     if urllib.parse.urlsplit(cfg["base_url"]).scheme != "https":
