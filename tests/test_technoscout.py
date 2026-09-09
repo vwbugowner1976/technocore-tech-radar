@@ -24,8 +24,10 @@ from technoscout.sender import (
 from technoscout.db import (
     agent_context,
     agent_relationship,
+    clear_autonomy_halt,
     connect,
     create_reply_draft,
+    get_autonomy_halt,
     get_meta,
     get_reply_draft,
     get_translation,
@@ -44,6 +46,7 @@ from technoscout.db import (
     get_last_send_attempt,
     set_draft_status,
     review_reply_draft,
+    set_autonomy_halt,
     set_meta,
     store_translation,
     top_agents,
@@ -299,6 +302,18 @@ class DatabaseTests(unittest.TestCase):
             self.assertIsNone(
                 get_translation(con, "draft_text", "42", "ja", "changed")
             )
+            con.close()
+
+    def test_autonomy_halt_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            self.assertEqual(get_autonomy_halt(con), "")
+            set_autonomy_halt(con, "send uncertain")
+            con.commit()
+            self.assertEqual(get_autonomy_halt(con), "send uncertain")
+            clear_autonomy_halt(con)
+            con.commit()
+            self.assertEqual(get_autonomy_halt(con), "")
             con.close()
 
     def test_meta_round_trip(self):
