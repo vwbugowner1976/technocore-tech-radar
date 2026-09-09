@@ -34,6 +34,7 @@ from technoscout.common import (
 )
 from technoscout.autonomy import evaluate_autonomy
 from collaboration_shadow import shadow_candidate
+from collaboration_shadow_eval import sync_shadow_evaluations
 from reaction_memory import auto_sync_reaction_memory
 from technoscout.llm_backend import create_llm_backend
 from technoscout.sender import (
@@ -50,6 +51,7 @@ from technoscout.db import (
     autonomy_decisions_for_draft,
     clear_autonomy_halt,
     collaboration_shadow_counts,
+    collaboration_shadow_evaluation_counts,
     connect,
     create_reply_draft,
     get_autonomy_halt,
@@ -1497,6 +1499,22 @@ class TechnoScout:
                     f"errors={stats.get('read_error',0)}",
                     flush=True,
                 )
+            shadow_stats = sync_shadow_evaluations(
+                self.db,
+                limit=200,
+                verbose=False,
+            )
+            if shadow_stats.get("changed", 0):
+                print(
+                    "[shadow-eval-auto] "
+                    f"checked={shadow_stats.get('checked',0)} "
+                    f"changed={shadow_stats.get('changed',0)} "
+                    f"resolved={shadow_stats.get('resolved',0)} "
+                    f"unresolved={shadow_stats.get('unresolved',0)} "
+                    f"actual_replied={shadow_stats.get('actual_replied',0)} "
+                    f"actual_no_reply={shadow_stats.get('actual_no_reply',0)}",
+                    flush=True,
+                )
         except Exception as exc:
             print(
                 f"[reaction-auto] ERROR {type(exc).__name__}: {exc}",
@@ -1540,6 +1558,10 @@ class TechnoScout:
             shadow_counts.get("SAME", 0)
             + shadow_counts.get("WOULD_PREFER", 0)
         )
+        shadow_eval_counts = collaboration_shadow_evaluation_counts(
+            self.db
+        )
+        shadow_eval_total = sum(shadow_eval_counts.values())
         print(
             f"TechnoScout v0.8 | rooms={total} selected={selected} pending={pending} "
             f"signals={signals} drafts=p{draft_counts.get('pending',0)}/"
@@ -1610,6 +1632,15 @@ class TechnoScout:
             f"due_limit={int(self.cfg.get('reaction_memory_auto_sync_send_limit',6))} "
             f"window={int(self.cfg.get('reaction_memory_auto_sync_message_limit',200))} "
             f"max_age={int(self.cfg.get('reaction_memory_auto_sync_max_age_seconds',86400))}s",
+            flush=True,
+        )
+        print(
+            "shadow_evaluation="
+            f"total:{shadow_eval_total} "
+            f"replied:{shadow_eval_counts.get('ACTUAL_REPLIED',0)} "
+            f"no_reply:{shadow_eval_counts.get('ACTUAL_NO_REPLY',0)} "
+            f"unresolved:{shadow_eval_counts.get('UNRESOLVED',0)} "
+            "(observation only)",
             flush=True,
         )
         for row in self.db.execute(
