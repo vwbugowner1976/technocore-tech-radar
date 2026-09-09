@@ -33,6 +33,7 @@ from technoscout.common import (
     utc_now,
 )
 from technoscout.autonomy import evaluate_autonomy
+from collaboration_shadow import shadow_candidate
 from technoscout.llm_backend import create_llm_backend
 from technoscout.sender import (
     ApprovedDraftSender,
@@ -193,6 +194,8 @@ def load_config(path: str) -> dict[str, Any]:
         "draft_min_relationship_score": 0,
         "draft_status_limit": 12,
         "retriage_selected_limit": 100,
+        "collaboration_shadow_enabled": True,
+        "collaboration_shadow_weight_percent": 35,
         "sending_enabled": False,
         "send_permit_required": True,
         "send_permit_ttl_seconds": 600,
@@ -1255,6 +1258,45 @@ class TechnoScout:
                                 key=lambda aid: agent_relationship(self.db, aid)["score"],
                             )
                             relationship = agent_relationship(self.db, target_agent)
+
+                            if bool(self.cfg.get("collaboration_shadow_enabled", True)):
+                                shadow = shadow_candidate(
+                                    self.db,
+                                    candidates,
+                                    relationship_lookup=lambda aid: agent_relationship(
+                                        self.db, aid
+                                    ),
+                                    collaboration_weight_percent=int(
+                                        self.cfg.get(
+                                            "collaboration_shadow_weight_percent",
+                                            35,
+                                        )
+                                    ),
+                                )
+                                if (
+                                    shadow is not None
+                                    and bool(shadow.get("has_reaction_evidence"))
+                                ):
+                                    chosen_marker = (
+                                        "SAME"
+                                        if str(shadow["agent_id"]) == target_agent
+                                        else "WOULD_PREFER"
+                                    )
+                                    evidence_info = shadow["evidence"]
+                                    print(
+                                        f"[collab-shadow] room={room} "
+                                        f"{chosen_marker} "
+                                        f"actual={target_agent[:28]} "
+                                        f"shadow={str(shadow['agent_id'])[:28]} "
+                                        f"relationship={shadow['relationship']} "
+                                        f"collaboration={shadow['collaboration']} "
+                                        f"combined={shadow['combined']} "
+                                        f"direct={evidence_info['responder_direct']} "
+                                        f"likely={evidence_info['responder_likely']} "
+                                        f"target_direct={evidence_info['target_direct']} "
+                                        f"target_likely={evidence_info['target_likely']}",
+                                        flush=True,
+                                    )
                             if relationship["score"] >= int(
                                 self.cfg.get("draft_min_relationship_score", 0)
                             ):
@@ -1426,6 +1468,13 @@ class TechnoScout:
             f"{self.cfg.get('watch_fetch_limit',8)} msgs/batch, "
             f"{self.cfg.get('watch_input_char_budget',3500)} chars, "
             f"{self.cfg.get('watch_llm_max_tokens',160)} tokens"
+        )
+        print(
+            "collaboration_shadow="
+            f"{'on' if self.cfg.get('collaboration_shadow_enabled',True) else 'off'} "
+            f"weight={int(self.cfg.get('collaboration_shadow_weight_percent',35))}% "
+            "(observation only; target selection unchanged)",
+            flush=True,
         )
         for row in self.db.execute(
             """
