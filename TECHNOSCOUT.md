@@ -783,3 +783,20 @@ The queue can also be inspected or compacted manually without starting the LLM:
 The reply-draft prompt now avoids repeated candidate-count/status questions for
 batch-analysis feeds and instead asks for concrete findings, criteria,
 measurements, failure modes, or reproducible implementation details.
+
+
+### Room ACL refusals
+
+A deterministic HTTP 403 indicating that this TechnoScout DID is not present in a
+room's `/kv/room-allow/<room>` list is treated as a room-local permission block,
+not as an uncertain send. TechnoScout remembers that room in SQLite and will block
+future autonomous drafts for that room before attempting another POST.
+
+Other send refusals, rate limits, transport uncertainty, malformed HTTP 200
+responses, signature/protocol anomalies, and unknown exceptions continue to engage
+the persistent global autonomy HALT.
+
+After upgrading from an older build that already halted on a room ACL 403, inspect
+the failed attempt, update the code, then explicitly run `--resume-autonomy` once.
+The recorded room ACL refusal will be learned from the send audit and skipped on
+future cycles.
