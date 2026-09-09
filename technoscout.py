@@ -949,11 +949,24 @@ class TechnoScout:
                                         )
                                         if created:
                                             drafts_created += 1
+                                            self.db.commit()
+                                            draft_row = get_reply_draft_by_room_seq(
+                                                self.db,
+                                                room,
+                                                new_last,
+                                            )
                                             print(
                                                 f"[draft] room={room} target={target_agent[:28]} "
                                                 f"relationship={relationship['score']} created",
                                                 flush=True,
                                             )
+                                            if draft_row is not None:
+                                                self._autonomy_handle_draft(
+                                                    int(draft_row["id"]),
+                                                    result,
+                                                    evidence,
+                                                    tags,
+                                                )
                                 except Exception as exc:
                                     print(
                                         f"[draft] ERROR room={room}: {type(exc).__name__}: "
@@ -1017,7 +1030,20 @@ class TechnoScout:
         print(
             f"send_permit_required={bool(self.cfg.get('send_permit_required', True))} "
             f"ttl={int(self.cfg.get('send_permit_ttl_seconds', 600))}s "
-            "(approve -> arm -> one explicit send)",
+            "(manual approve -> arm -> one explicit send)",
+            flush=True,
+        )
+        print(
+            f"autonomy_mode={self.cfg.get('autonomy_mode','shadow')} "
+            f"min_rel={int(self.cfg.get('autonomy_min_relevance',75))} "
+            f"min_tech={int(self.cfg.get('autonomy_min_technical',75))} "
+            f"max/hour={int(self.cfg.get('autonomy_max_sends_per_hour',3))}",
+            flush=True,
+        )
+        print(
+            f"translation={'on' if self.cfg.get('translation_enabled',True) else 'off'} "
+            f"ui_language={self.cfg.get('ui_language','ja')} "
+            "outbound_language=en",
             flush=True,
         )
         print(
@@ -1095,6 +1121,32 @@ class TechnoScout:
             f"draft: {row['draft_text']}",
             flush=True,
         )
+        if (
+            bool(self.cfg.get("translation_enabled", True))
+            and str(self.cfg.get("ui_language", "ja")).lower() == "ja"
+        ):
+            try:
+                reason_ja = self._translate_ja(
+                    "draft_reason",
+                    str(row["id"]),
+                    str(row["reason"]),
+                )
+                draft_ja = self._translate_ja(
+                    "draft_text",
+                    str(row["id"]),
+                    str(row["draft_text"]),
+                )
+                if reason_ja:
+                    print(f"理由(日本語): {reason_ja}", flush=True)
+                if draft_ja:
+                    print(f"投稿案(日本語): {draft_ja}", flush=True)
+            except Exception as exc:
+                print(
+                    f"[translation] draft #{draft_id} skipped: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     def review_draft(self, draft_id: int, status: str) -> None:
         row = get_reply_draft(self.db, draft_id)
@@ -1116,6 +1168,48 @@ class TechnoScout:
             f"draft: {row['draft_text']}",
             flush=True,
         )
+
+    def recent_ja(self) -> None:
+        rows = recent_observations(
+            self.db,
+            int(self.cfg.get("japanese_recent_limit", 8)),
+        )
+        print(f"最近の技術シグナル | {len(rows)}件", flush=True)
+        for row in rows:
+            summary = str(row["summary"])
+            try:
+                ja = self._translate_ja(
+                    "observation_summary",
+                    str(row["id"]),
+                    summary,
+                )
+            except Exception as exc:
+                ja = f"[翻訳失敗: {type(exc).__name__}]"
+            print(
+                f"\n#{row['id']} room={row['room']} action={row['action']} "
+                f"rel={row['relevance'] or 0} tech={row['technical'] or 0}\n"
+                f"EN: {summary}\n"
+                f"JA: {ja}",
+                flush=True,
+            )
+
+    def autonomy_status(self, draft_id: int) -> None:
+        row = get_reply_draft(self.db, draft_id)
+        if row is None:
+            raise ValueError(f"draft #{draft_id} not found")
+        decisions = autonomy_decisions_for_draft(self.db, draft_id, limit=20)
+        print(
+            f"Autonomy Decisions | draft=#{draft_id} "
+            f"status={row['status']} count={len(decisions)}",
+            flush=True,
+        )
+        for item in decisions:
+            print(
+                f"  decision=#{item['id']} mode={item['mode']} "
+                f"allowed={bool(item['allowed'])} "
+                f"outcome={item['outcome']} reason={item['reason']}",
+                flush=True,
+            )
 
     def diagnose_seed(self) -> None:
         env_name = str(self.cfg.get("signing_seed_env", "SIGN_SEED"))
@@ -1301,6 +1395,7 @@ def main() -> None:
     modes.add_argument("--status", action="store_true")
     modes.add_argument("--agents", action="store_true")
     modes.add_argument("--drafts", action="store_true")
+    modes.add_argument("--recent-ja", action="store_true")
     modes.add_argument("--show-draft", type=int, metavar="ID")
     modes.add_argument("--retriage-selected", action="store_true")
     modes.add_argument("--approve-draft", type=int, metavar="ID")
@@ -1308,6 +1403,7 @@ def main() -> None:
     modes.add_argument("--sender-status", action="store_true")
     modes.add_argument("--diagnose-seed", action="store_true")
     modes.add_argument("--send-attempts", type=int, metavar="ID")
+    modes.add_argument("--autonomy-decisions", type=int, metavar="ID")
     modes.add_argument("--send-permits", type=int, metavar="ID")
     modes.add_argument("--arm-send", type=int, metavar="ID")
     modes.add_argument("--disarm-send", type=int, metavar="ID")
@@ -1317,8 +1413,8 @@ def main() -> None:
     cfg = load_config(args.config)
     scout = TechnoScout(cfg)
     print(
-        f"TechnoScout v0.8 | default=READ-ONLY | "
-        f"send=ONE-TIME-PERMIT | "
+        f"TechnoScout v0.8 | autonomy={cfg.get('autonomy_mode','shadow')} | "
+        f"manual_send=ONE-TIME-PERMIT | "
         f"LLM={cfg['llm_backend']} | DB={database_path(cfg)}",
         flush=True,
     )
@@ -1331,6 +1427,9 @@ def main() -> None:
             return
         if args.drafts:
             scout.drafts_status()
+            return
+        if args.recent_ja:
+            scout.recent_ja()
             return
         if args.show_draft is not None:
             scout.show_draft(args.show_draft)
@@ -1353,6 +1452,9 @@ def main() -> None:
             return
         if args.send_attempts is not None:
             scout.send_attempts_status(args.send_attempts)
+            return
+        if args.autonomy_decisions is not None:
+            scout.autonomy_status(args.autonomy_decisions)
             return
         if args.send_permits is not None:
             scout.send_permits_status(args.send_permits)
