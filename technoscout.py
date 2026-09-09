@@ -1293,6 +1293,26 @@ class TechnoScout:
                 f"draft: {row['draft_text']}"
             )
 
+    def supersede_stale_pending(self) -> None:
+        rows = pending_reply_drafts(self.db, 100000)
+        seen: set[tuple[str, str]] = set()
+        changed = 0
+        for row in rows:
+            key = (str(row["room"]), str(row["target_agent"]))
+            if key in seen:
+                if mark_pending_draft_status(
+                    self.db, int(row["id"]), "superseded"
+                ):
+                    changed += 1
+            else:
+                seen.add(key)
+        self.db.commit()
+        print(
+            f"Stale pending drafts superseded={changed} "
+            f"remaining={reply_draft_counts(self.db).get('pending',0)}",
+            flush=True,
+        )
+
     def show_draft(self, draft_id: int) -> None:
         row = get_reply_draft(self.db, draft_id)
         if row is None:
