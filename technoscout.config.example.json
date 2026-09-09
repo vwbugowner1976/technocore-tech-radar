@@ -68,6 +68,7 @@
   "translation_timeout_seconds": 30,
   "translation_max_tokens": 320,
   "japanese_recent_limit": 8,
+  "japanese_room_message_limit": 6,
   "autonomy_mode": "shadow",
   "autonomy_min_relevance": 75,
   "autonomy_min_technical": 75,
