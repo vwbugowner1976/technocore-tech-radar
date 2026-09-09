@@ -361,6 +361,149 @@ class TechnoScout:
         finally:
             self.db.close()
 
+    def _translate_ja(self, source_type: str, source_key: str, text: str) -> str:
+        if not bool(self.cfg.get("translation_enabled", True)):
+            return ""
+        source = str(text or "").strip()
+        if not source:
+            return ""
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        cached = get_translation(
+            self.db,
+            source_type,
+            source_key,
+            "ja",
+            digest,
+        )
+        if cached is not None:
+            return cached
+
+        result = local_llm_json(
+            self.cfg,
+            self.llm,
+            self.research_model,
+            TRANSLATE_JA_PROMPT,
+            {"text": source[:5000]},
+            max_tokens=int(self.cfg.get("translation_max_tokens", 320)),
+            timeout_seconds=float(self.cfg.get("translation_timeout_seconds", 30)),
+        )
+        translated = str(result.get("translation", "")).strip()
+        if translated:
+            store_translation(
+                self.db,
+                source_type,
+                source_key,
+                "ja",
+                digest,
+                translated,
+                utc_now(),
+            )
+            self.db.commit()
+        return translated
+
+    def _autonomy_handle_draft(
+        self,
+        draft_id: int,
+        signal_result: dict[str, Any],
+        evidence: list[int],
+        tags: list[str],
+    ) -> None:
+        mode = str(self.cfg.get("autonomy_mode", "shadow")).lower()
+        if mode == "off":
+            return
+
+        draft = get_reply_draft(self.db, draft_id)
+        if draft is None:
+            return
+
+        now_dt = datetime.now(timezone.utc)
+        since = (now_dt - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent_hour = recent_sent_count(self.db, since)
+
+        room_age = seconds_since_iso(last_sent_at_for_room(self.db, draft["room"]))
+        agent_age = seconds_since_iso(last_sent_at_for_agent(self.db, draft["target_agent"]))
+        room_cooldown_ok = (
+            room_age is None
+            or room_age >= float(self.cfg.get("autonomy_room_cooldown_seconds", 3600))
+        )
+        agent_cooldown_ok = (
+            agent_age is None
+            or agent_age >= float(self.cfg.get("autonomy_agent_cooldown_seconds", 3600))
+        )
+
+        decision = evaluate_autonomy(
+            self.cfg,
+            room=str(draft["room"]),
+            draft_text=str(draft["draft_text"]),
+            signal_summary=str(signal_result.get("summary", "")),
+            tags=tags,
+            relevance=clamp_score(signal_result.get("relevance")),
+            technical=clamp_score(signal_result.get("technical")),
+            relationship=int(draft["relationship_score"]),
+            evidence_seqs=evidence,
+            recent_hour_sends=recent_hour,
+            room_cooldown_ok=room_cooldown_ok,
+            agent_cooldown_ok=agent_cooldown_ok,
+        )
+        outcome = "would_send" if decision.allowed and mode == "shadow" else "blocked"
+        decision_id = record_autonomy_decision(
+            self.db,
+            draft_id,
+            utc_now(),
+            mode,
+            decision.allowed,
+            decision.reason,
+            outcome,
+        )
+        self.db.commit()
+
+        if mode == "shadow":
+            print(
+                f"[autonomy:shadow] draft=#{draft_id} "
+                f"{'WOULD_SEND' if decision.allowed else 'BLOCK'} - {decision.reason}",
+                flush=True,
+            )
+            return
+
+        if not decision.allowed:
+            print(
+                f"[autonomy:limited] draft=#{draft_id} BLOCK - {decision.reason}",
+                flush=True,
+            )
+            return
+
+        try:
+            if not review_reply_draft(self.db, draft_id, "approved"):
+                raise RuntimeError("draft could not be auto-approved")
+            self.db.commit()
+            approved = get_reply_draft(self.db, draft_id)
+            sender = ApprovedDraftSender(self.cfg, self.db)
+            permit = sender.arm_draft(approved)
+            result = sender.send_draft(
+                approved,
+                permit_token=str(permit["token"]),
+            )
+            update_autonomy_outcome(self.db, decision_id, "sent")
+            self.db.commit()
+            print(
+                f"[autonomy:limited] SENT draft=#{draft_id} "
+                f"room={result['room']} seq={result['seq']}",
+                flush=True,
+            )
+        except Exception as exc:
+            update_autonomy_outcome(
+                self.db,
+                decision_id,
+                f"error:{type(exc).__name__}",
+            )
+            self.db.commit()
+            print(
+                f"[autonomy:limited] ERROR draft=#{draft_id}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
     def _remember_encounters(self, messages: list[dict[str, Any]], room: str, seen_at: str) -> list[str]:
         if not bool(self.cfg.get("agent_memory", True)):
             return []
