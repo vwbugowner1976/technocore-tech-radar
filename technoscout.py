@@ -1571,12 +1571,20 @@ class TechnoScout:
             raise ValueError(f"draft #{draft_id} not found")
         sender = ApprovedDraftSender(self.cfg, self.db)
         result = sender.send_draft(row, permit_token=permit_token)
+        superseded = supersede_older_pending_drafts(
+            self.db,
+            str(row["room"]),
+            str(row["target_agent"]),
+            draft_id,
+        )
+        self.db.commit()
         print(
             "SIGNED SEND VERIFIED\n"
             f"draft=#{result['draft_id']} room={result['room']} "
             f"seq={result['seq']}\n"
             f"did={result['did']}\n"
             f"nonce={result['nonce']}\n"
+            f"superseded_older_pending={superseded}\n"
             "The exact signed record was present in Technocore's HTTP 200 "
             "JSON response.",
             flush=True,
