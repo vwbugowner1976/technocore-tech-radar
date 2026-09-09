@@ -197,6 +197,19 @@ CREATE TABLE IF NOT EXISTS collaboration_shadow_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_collab_shadow_marker
     ON collaboration_shadow_decisions(marker, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS collaboration_shadow_evaluations (
+    decision_id INTEGER PRIMARY KEY,
+    evaluated_at TEXT NOT NULL,
+    state TEXT NOT NULL,
+    send_attempt_id INTEGER,
+    classification TEXT NOT NULL DEFAULT '',
+    coverage TEXT NOT NULL DEFAULT '',
+    responder_did TEXT NOT NULL DEFAULT '',
+    actual_target_replied INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_collab_shadow_eval_state
+    ON collaboration_shadow_evaluations(state, evaluated_at DESC);
 """
 
 
@@ -1264,6 +1277,90 @@ def collaboration_shadow_rows(
           target_direct,target_likely
         FROM collaboration_shadow_decisions
         ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+
+def upsert_collaboration_shadow_evaluation(
+    con: sqlite3.Connection,
+    *,
+    decision_id: int,
+    evaluated_at: str,
+    state: str,
+    send_attempt_id: int | None,
+    classification: str,
+    coverage: str,
+    responder_did: str,
+    actual_target_replied: bool,
+) -> None:
+    state = str(state).upper()
+    if state not in {"UNRESOLVED", "ACTUAL_REPLIED", "ACTUAL_NO_REPLY"}:
+        raise ValueError(f"invalid collaboration shadow evaluation state: {state}")
+    con.execute(
+        """
+        INSERT INTO collaboration_shadow_evaluations(
+          decision_id,evaluated_at,state,send_attempt_id,classification,
+          coverage,responder_did,actual_target_replied
+        ) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(decision_id) DO UPDATE SET
+          evaluated_at=excluded.evaluated_at,
+          state=excluded.state,
+          send_attempt_id=excluded.send_attempt_id,
+          classification=excluded.classification,
+          coverage=excluded.coverage,
+          responder_did=excluded.responder_did,
+          actual_target_replied=excluded.actual_target_replied
+        """,
+        (
+            int(decision_id),
+            str(evaluated_at),
+            state,
+            int(send_attempt_id) if send_attempt_id is not None else None,
+            str(classification)[:80],
+            str(coverage)[:40],
+            str(responder_did)[:240],
+            1 if actual_target_replied else 0,
+        ),
+    )
+
+
+def collaboration_shadow_evaluation_counts(
+    con: sqlite3.Connection,
+) -> dict[str, int]:
+    result = {
+        "UNRESOLVED": 0,
+        "ACTUAL_REPLIED": 0,
+        "ACTUAL_NO_REPLY": 0,
+    }
+    for row in con.execute(
+        """
+        SELECT state,COUNT(*) AS n
+        FROM collaboration_shadow_evaluations
+        GROUP BY state
+        """
+    ).fetchall():
+        result[str(row["state"])] = int(row["n"])
+    return result
+
+
+def collaboration_shadow_evaluation_rows(
+    con: sqlite3.Connection,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT
+          e.decision_id,e.evaluated_at,e.state,e.send_attempt_id,
+          e.classification,e.coverage,e.responder_did,
+          e.actual_target_replied,
+          d.marker,d.room,d.through_seq,d.actual_agent,d.shadow_agent,
+          d.actual_relationship,d.shadow_relationship,
+          d.shadow_collaboration,d.shadow_combined,d.candidate_count
+        FROM collaboration_shadow_evaluations e
+        JOIN collaboration_shadow_decisions d ON d.id=e.decision_id
+        ORDER BY e.decision_id DESC
         LIMIT ?
         """,
         (max(1, int(limit)),),
