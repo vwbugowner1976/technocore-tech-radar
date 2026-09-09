@@ -35,13 +35,25 @@ def archive_decided_blocks(con) -> int:
 
 def supersede_stale_pending(con) -> int:
     rows = pending_reply_drafts(con, 100000)
+    sent_cutoffs = {
+        (str(row["room"]), str(row["target_agent"])): int(row["max_id"])
+        for row in con.execute(
+            """
+            SELECT room,target_agent,MAX(id) AS max_id
+            FROM reply_drafts
+            WHERE status='sent'
+            GROUP BY room,target_agent
+            """
+        ).fetchall()
+    }
     seen: set[tuple[str, str]] = set()
     changed = 0
     for row in rows:
         key = (str(row["room"]), str(row["target_agent"]))
-        if key in seen:
+        draft_id = int(row["id"])
+        if draft_id < sent_cutoffs.get(key, 0) or key in seen:
             if mark_pending_draft_status(
-                con, int(row["id"]), "superseded"
+                con, draft_id, "superseded"
             ):
                 changed += 1
         else:
