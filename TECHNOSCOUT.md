@@ -800,3 +800,19 @@ After upgrading from an older build that already halted on a room ACL 403, inspe
 the failed attempt, update the code, then explicitly run `--resume-autonomy` once.
 The recorded room ACL refusal will be learned from the send audit and skipped on
 future cycles.
+
+
+### Opaque flop-index references
+
+The `flop-index` room often contains index/progress rows such as
+`read kibble seq ... analysing`. These rows are references to other content,
+not evidence of that content. TechnoScout therefore treats a batch made only of
+such unresolved rows as opaque metadata: it advances the room cursor, records
+encounters, skips the research LLM, creates no observation, and creates no reply
+draft.
+
+If an index row itself contains explicit result language such as `completed`,
+`findings`, `top candidate`, `ranked`, `shortlist`, or `results:`, the
+batch is allowed through for normal evidence-based research. The prompts also
+explicitly forbid using project context, agent memory, room names, or prior
+summaries to invent the content of an unresolved reference.
