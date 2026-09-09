@@ -1637,10 +1637,22 @@ class TechnoScout:
             {"format": "json", "limit": limit},
         )
         messages = room_messages(payload)
-        print(f"Room 日本語ビュー | {room} | {len(messages)} messages", flush=True)
+        try:
+            own_did = SigningIdentity.from_env(
+                str(self.cfg.get("signing_seed_env", "SIGN_SEED")),
+                str(self.cfg.get("signing_env_file", ".env")),
+            ).did
+        except Exception:
+            own_did = ""
+        print(
+            f"Room 日本語ビュー | {room} | {len(messages)} messages"
+            + (f" | SELF={own_did}" if own_did else ""),
+            flush=True,
+        )
         for item in messages:
             seq = seq_of(item)
             sender = agent_id_of(item) or str(item.get("from", ""))[:80]
+            marker = " [SELF]" if own_did and sender == own_did else ""
             text = str(item.get("text", item.get("message", ""))).strip()
             if not text:
                 continue
@@ -1653,7 +1665,7 @@ class TechnoScout:
             except Exception as exc:
                 ja = f"[翻訳失敗: {type(exc).__name__}]"
             print(
-                f"\nseq={seq} from={sender}\n"
+                f"\nseq={seq} from={sender}{marker}\n"
                 f"EN: {text}\n"
                 f"JA: {ja}",
                 flush=True,
