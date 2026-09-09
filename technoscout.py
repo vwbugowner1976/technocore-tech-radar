@@ -65,6 +65,7 @@ from technoscout.db import (
     recent_sent_count,
     reply_draft_counts,
     reply_drafts_by_status,
+    reaction_memory_counts,
     review_reply_draft,
     revoke_send_permits,
     send_attempts_for_draft,
@@ -1369,6 +1370,10 @@ class TechnoScout:
         useful_agents = self.db.execute(
             "SELECT COUNT(*) n FROM agents WHERE useful_signal_count > 0"
         ).fetchone()["n"]
+        reaction_counts = reaction_memory_counts(self.db)
+        reaction_total = self.db.execute(
+            "SELECT COUNT(*) n FROM reaction_memory"
+        ).fetchone()["n"]
         print(
             f"TechnoScout v0.8 | rooms={total} selected={selected} pending={pending} "
             f"signals={signals} drafts=p{draft_counts.get('pending',0)}/"
@@ -1376,8 +1381,19 @@ class TechnoScout:
             f"s{draft_counts.get('sent',0)}/u{draft_counts.get('send_uncertain',0)}/"
             f"b{draft_counts.get('autonomy_blocked',0) + draft_counts.get('send_blocked',0)}/"
             f"x{draft_counts.get('superseded',0)} "
-            f"agents={agents} useful_agents={useful_agents}"
+            f"agents={agents} useful_agents={useful_agents} "
+            f"reactions={reaction_total}"
         )
+        if reaction_total:
+            print(
+                "reaction_memory="
+                f"direct:{reaction_counts.get('DIRECT_REPLY',0)} "
+                f"likely:{reaction_counts.get('LIKELY_REACTION',0)} "
+                f"activity:{reaction_counts.get('ROOM_ACTIVITY',0)} "
+                f"partial:{reaction_counts.get('WINDOW_TRUNCATED',0)} "
+                f"none:{reaction_counts.get('NO_REACTION',0)}",
+                flush=True,
+            )
         print(f"triage_model={self.triage_model}", flush=True)
         print(f"research_model={self.research_model}", flush=True)
         print(f"llm_backend={self.llm.describe()}", flush=True)
