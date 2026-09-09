@@ -23,6 +23,12 @@ REPLY_SEQ_RE = re.compile(
     re.I,
 )
 
+GENERIC_PROTOCOL_TERMS = {
+    "analysis", "analyse", "analyz", "candidate", "contract", "deal",
+    "escrow", "evidence", "lock", "locked", "message", "prose",
+    "receipt", "reveal", "secret", "status", "tclk1", "transaction",
+}
+
 STOPWORDS = {
     "about", "after", "again", "also", "being", "could", "current",
     "details", "does", "from", "have", "into", "more", "please",
@@ -75,6 +81,47 @@ def content_terms(text: str) -> set[str]:
     }
 
 
+def strong_content_terms(text: str) -> set[str]:
+    return {
+        term for term in content_terms(text)
+        if term not in GENERIC_PROTOCOL_TERMS
+    }
+
+
+def opaque_flop_index_message(room: str, text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if str(room).lower() != "flop-index":
+        return False
+    if not normalized.startswith("read kibble seq "):
+        return False
+    result_terms = (
+        " completed",
+        " complete ",
+        " findings",
+        " top candidate",
+        " ranked",
+        " shortlist",
+        " selected candidate",
+        " results:",
+    )
+    return not any(term in normalized for term in result_terms)
+
+
+def reaction_window_truncated(
+    messages: list[dict[str, Any]],
+    our_seq: int,
+    requested_limit: int,
+) -> bool:
+    after = [
+        seq_of(item)
+        for item in messages
+        if seq_of(item) > int(our_seq)
+    ]
+    if len(messages) < max(1, int(requested_limit)) or not after:
+        return False
+    return min(after) > int(our_seq) + 1
+
+
 def explicit_reply(
     item: dict[str, Any],
     our_seq: int,
@@ -94,16 +141,31 @@ def explicit_reply(
     if match and int(match.group(1)) == int(our_seq):
         return True
 
-    return any(did and did in text for did in self_dids)
+    lowered = text.lower()
+    for did in self_dids:
+        did = str(did or "").strip()
+        if not did:
+            continue
+        if f"@{did}".lower() in lowered:
+            return True
+        if re.search(
+            rf"\b(?:reply|response)\s+(?:to\s+)?{re.escape(did)}\b",
+            text,
+            re.I,
+        ):
+            return True
+    return False
 
 
 def classify_reaction(
     *,
+    room: str = "",
     our_seq: int,
     our_text: str,
     target_agent: str,
     messages: list[dict[str, Any]],
     self_dids: set[str],
+    window_truncated: bool = False,
 ) -> tuple[str, dict[str, Any] | None, int, int]:
     foreign = [
         item
@@ -120,32 +182,50 @@ def classify_reaction(
         if explicit_reply(item, our_seq, self_dids):
             return "DIRECT_REPLY", item, 0, len(foreign)
 
-    ours = content_terms(our_text)
+    ours = strong_content_terms(our_text)
     best: tuple[int, int, dict[str, Any]] | None = None
     for item in foreign:
         gap = seq_of(item) - int(our_seq)
         if gap < 0:
             continue
-        theirs = content_terms(text_of(item))
-        overlap = len(ours & theirs)
-        sender_bonus = 2 if target_agent and sender_of(item) == target_agent else 0
-        thread_bonus = 1 if "regarding recent thread" in text_of(item).lower() else 0
 
+        text = text_of(item)
+        if opaque_flop_index_message(room, text):
+            continue
+
+        theirs = strong_content_terms(text)
+        overlap = len(ours & theirs)
+        target_match = bool(
+            target_agent and sender_of(item) == target_agent
+        )
+        thread_marker = "regarding recent thread" in text.lower()
+
+        # Conservative: generic protocol words are excluded above. A likely
+        # reaction needs either two concrete shared terms nearby, or one
+        # concrete term from the intended target agent very nearby.
         likely = (
-            (gap <= 2 and overlap >= 1)
-            or (gap <= 20 and overlap >= 2)
-            or (gap <= 50 and sender_bonus and overlap >= 1)
-            or (gap <= 20 and thread_bonus and overlap >= 1)
+            (gap <= 10 and overlap >= 2)
+            or (gap <= 20 and target_match and overlap >= 1)
+            or (gap <= 10 and thread_marker and overlap >= 2)
         )
         if not likely:
             continue
-        score = overlap * 10 + sender_bonus + thread_bonus - min(gap, 100)
+
+        score = (
+            overlap * 20
+            + (8 if target_match else 0)
+            + (3 if thread_marker else 0)
+            - min(gap, 20)
+        )
         candidate = (score, overlap, item)
         if best is None or candidate[0] > best[0]:
             best = candidate
 
     if best is not None:
         return "LIKELY_REACTION", best[2], best[1], len(foreign)
+
+    if window_truncated:
+        return "WINDOW_TRUNCATED", foreign[0], 0, len(foreign)
 
     return "ROOM_ACTIVITY", foreign[0], 0, len(foreign)
 
@@ -252,6 +332,7 @@ def main() -> None:
             "DIRECT_REPLY": 0,
             "LIKELY_REACTION": 0,
             "ROOM_ACTIVITY": 0,
+            "WINDOW_TRUNCATED": 0,
             "NO_REACTION": 0,
             "READ_ERROR": 0,
         }
@@ -282,17 +363,25 @@ def main() -> None:
                 print(f"RESULT: READ_ERROR {type(exc).__name__}: {exc}")
                 continue
 
+            truncated = reaction_window_truncated(
+                messages,
+                our_seq,
+                args.message_limit,
+            )
             classification, candidate, overlap, foreign_count = classify_reaction(
+                room=str(row["room"]),
                 our_seq=our_seq,
                 our_text=str(row["text"]),
                 target_agent=str(row["target_agent"]),
                 messages=messages,
                 self_dids=self_dids,
+                window_truncated=truncated,
             )
             totals[classification] += 1
             print(
                 f"RESULT: {classification} "
-                f"foreign_posts_in_window={foreign_count}"
+                f"foreign_posts_in_window={foreign_count} "
+                f"coverage={'PARTIAL' if truncated else 'OBSERVED'}"
             )
 
             if candidate is not None:
@@ -314,7 +403,9 @@ def main() -> None:
         )
         print(
             "Note: ROOM_ACTIVITY means only that other agents posted later in "
-            "the fetched room window. It is not counted as a reply."
+            "the observed room window. WINDOW_TRUNCATED means the busy-room "
+            "window did not include the messages immediately after our post, "
+            "so a reply may have been missed. Neither is counted as a reply."
         )
     finally:
         con.close()
