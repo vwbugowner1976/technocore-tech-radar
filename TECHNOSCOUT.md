@@ -760,3 +760,26 @@ After inspecting the affected draft and its send attempts, a human may explicitl
 
 The halt survives process restarts and launchd restarts. Manual v0.7 permit-based sending remains a
 separate path.
+
+
+### Draft queue maintenance
+
+v0.8 keeps deterministic autonomy rejections out of the human review queue:
+new limited-mode policy rejections become `autonomy_blocked`, and a verified
+send supersedes older pending drafts for the same room and target agent.
+
+A one-time legacy queue compaction also runs on the first scout cycle after this
+upgrade. It archives pending drafts that already have a recorded blocked
+autonomy decision, then keeps only the newest pending draft for each
+room/target pair. No draft rows are deleted.
+
+The queue can also be inspected or compacted manually without starting the LLM:
+
+    .venv/bin/python draft_queue.py status
+    .venv/bin/python draft_queue.py cleanup
+    .venv/bin/python draft_queue.py blocked
+    .venv/bin/python draft_queue.py superseded
+
+The reply-draft prompt now avoids repeated candidate-count/status questions for
+batch-analysis feeds and instead asks for concrete findings, criteria,
+measurements, failure modes, or reproducible implementation details.
