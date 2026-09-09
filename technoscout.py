@@ -431,6 +431,32 @@ class TechnoScout:
             or agent_age >= float(self.cfg.get("autonomy_agent_cooldown_seconds", 3600))
         )
 
+        try:
+            own_identity = SigningIdentity.from_env(
+                str(self.cfg.get("signing_seed_env", "SIGN_SEED")),
+                str(self.cfg.get("signing_env_file", ".env")),
+            )
+            own_did = own_identity.did
+        except Exception:
+            own_did = ""
+
+        if own_did and str(draft["target_agent"]) == own_did:
+            decision_id = record_autonomy_decision(
+                self.db,
+                draft_id,
+                utc_now(),
+                mode,
+                False,
+                "target agent is this TechnoScout identity",
+                "blocked",
+            )
+            self.db.commit()
+            print(
+                f"[autonomy:{mode}] draft=#{draft_id} BLOCK - self-reply",
+                flush=True,
+            )
+            return
+
         decision = evaluate_autonomy(
             self.cfg,
             room=str(draft["room"]),
