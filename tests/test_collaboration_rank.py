@@ -1,6 +1,6 @@
 import unittest
 
-from collaboration_rank import rank_collaboration
+from collaboration_rank import rank_collaboration, rank_collaboration_memory
 
 
 class CollaborationRankTests(unittest.TestCase):
@@ -135,6 +135,43 @@ class CollaborationRankTests(unittest.TestCase):
         self.assertEqual(totals["ROOM_ACTIVITY"], 1)
         self.assertEqual(responders, {})
         self.assertEqual(targets["did:key:target"].room_activity, 1)
+
+
+
+    def test_memory_ranking_uses_persisted_responder(self):
+        rows = [
+            {
+                "classification": "LIKELY_REACTION",
+                "coverage": "OBSERVED",
+                "responder_did": "did:key:responder",
+                "target_agent": "did:key:target",
+                "room": "lab",
+                "overlap": 2,
+            }
+        ]
+        responders, targets, totals = rank_collaboration_memory(rows)
+        self.assertEqual(totals["LIKELY_REACTION"], 1)
+        self.assertEqual(responders["did:key:responder"].likely, 1)
+        self.assertEqual(targets["did:key:target"].observed, 1)
+        self.assertEqual(targets["did:key:target"].score, 0)
+
+    def test_memory_partial_does_not_reduce_target(self):
+        rows = [
+            {
+                "classification": "WINDOW_TRUNCATED",
+                "coverage": "PARTIAL",
+                "responder_did": "",
+                "target_agent": "did:key:target",
+                "room": "busy",
+                "overlap": 0,
+            }
+        ]
+        responders, targets, totals = rank_collaboration_memory(rows)
+        self.assertEqual(totals["WINDOW_TRUNCATED"], 1)
+        self.assertEqual(responders, {})
+        self.assertEqual(targets["did:key:target"].partial, 1)
+        self.assertEqual(targets["did:key:target"].observed, 0)
+        self.assertEqual(targets["did:key:target"].score, 0)
 
 
 if __name__ == "__main__":
