@@ -199,8 +199,17 @@ def load_config(path: str) -> dict[str, Any]:
         "autonomy_agent_cooldown_seconds": 3600,
         "autonomy_max_draft_chars": 600,
         "autonomy_blocked_room_terms": [
-            "governance", "tclk", "offer", "market", "trade", "wallet",
+            "technocore", "governance", "tclk", "offer", "market", "trade", "wallet",
             "crypto", "payment", "escrow", "faucet", "airdrop", "reward",
+        ],
+        "autonomy_required_technical_terms": [
+            "benchmark", "latency", "inference", "streaming", "token usage",
+            "zmk", "zephyr", "nrf52840", "nrf52", "ble", "bluetooth",
+            "hid", "usb", "firmware", "embedded", "mcu", "trackball",
+            "protocol", "cryptographic", "cryptography", "signature",
+            "x25519", "ed25519", "routing", "mesh", "telemetry",
+            "erasure coding", "data availability", "compiler", "database",
+            "driver", "sensor", "throughput", "p95", "p99",
         ],
         "autonomy_blocked_text_terms": [
             "wallet", "payment", "refund", "escrow", "lock funds",
