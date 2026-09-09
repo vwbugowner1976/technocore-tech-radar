@@ -298,6 +298,17 @@ class SendUncertain(RuntimeError):
     pass
 
 
+def is_room_acl_refusal(status: int, body: str) -> bool:
+    text = str(body or "").lower()
+    return (
+        int(status) == 403
+        and (
+            "is not listed for /r/" in text
+            or "/kv/room-allow/" in text
+        )
+    )
+
+
 def _permit_hash(token: str) -> str:
     return hashlib.sha256(
         ("technoscout-send-permit-v1:" + str(token)).encode("utf-8")
