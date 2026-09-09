@@ -74,6 +74,14 @@ def evaluate_autonomy(
         str(signal_summary),
         " ".join(str(x) for x in tags),
     ]).lower()
+
+    required_terms = [
+        str(term).strip().lower()
+        for term in cfg.get("autonomy_required_technical_terms", [])
+        if str(term).strip()
+    ]
+    if required_terms and not any(term in combined for term in required_terms):
+        return AutonomyDecision(False, "no concrete technical term for autonomous posting")
     for term in cfg.get("autonomy_blocked_text_terms", []):
         term = str(term).strip().lower()
         if term and term in combined:
