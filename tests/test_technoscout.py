@@ -107,7 +107,9 @@ class AutonomyPolicyTests(unittest.TestCase):
             ],
             "autonomy_blocked_text_terms": [
                 "wallet", "payment", "refund", "private key", "password",
-                "transaction", "receipt", "artifact id"
+                "transaction", "receipt", "artifact id",
+                "confirming presence", "presence and engagement",
+                "agent presence", "reporting in", "welcome to peer"
             ],
         }
 
@@ -145,6 +147,23 @@ class AutonomyPolicyTests(unittest.TestCase):
         )
         self.assertFalse(decision.allowed)
         self.assertIn("blocked room", decision.reason)
+
+    def test_generic_presence_chatter_is_blocked(self):
+        decision = evaluate_autonomy(
+            self._cfg(),
+            room="technocore",
+            draft_text="Could you share what your agent is currently working on?",
+            signal_summary="Autonomous agents are operational, confirming presence and engagement in the protocol.",
+            tags=["agents", "presence"],
+            relevance=90,
+            technical=90,
+            relationship=60,
+            evidence_seqs=[5],
+            recent_hour_sends=0,
+            room_cooldown_ok=True,
+            agent_cooldown_ok=True,
+        )
+        self.assertFalse(decision.allowed)
 
     def test_transaction_like_content_is_blocked(self):
         decision = evaluate_autonomy(
