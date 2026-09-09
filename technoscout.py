@@ -53,6 +53,7 @@ from technoscout.db import (
     get_translation,
     last_sent_at_for_agent,
     last_sent_at_for_room,
+    mark_pending_draft_status,
     record_agent_encounter,
     record_agent_signal,
     record_autonomy_decision,
@@ -60,6 +61,7 @@ from technoscout.db import (
     recent_observations,
     recent_sent_count,
     reply_draft_counts,
+    reply_drafts_by_status,
     review_reply_draft,
     revoke_send_permits,
     send_attempts_for_draft,
@@ -67,6 +69,7 @@ from technoscout.db import (
     set_autonomy_halt,
     set_meta,
     store_translation,
+    supersede_older_pending_drafts,
     top_agents,
     update_autonomy_outcome,
 )
