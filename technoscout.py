@@ -207,7 +207,8 @@ def load_config(path: str) -> dict[str, Any]:
             "transfer funds", "private key", "seed phrase", "api key",
             "password", "credential", "vote", "governance",
             "consensus participant", "endorsement", "accept offer",
-            "purchase", "buy ", "sell ",
+            "purchase", "buy ", "sell ", "transaction", "receipt",
+            "artifact id", "artifact ID", "lock and refund",
         ],
         "prefilter_keywords": [
             "zmk", "zephyr", "nrf52", "nrf52840", "ble", "hid", "keyboard", "trackball",
