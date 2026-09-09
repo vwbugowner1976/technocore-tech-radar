@@ -184,6 +184,7 @@ def load_config(path: str) -> dict[str, Any]:
         "translation_timeout_seconds": 30,
         "translation_max_tokens": 320,
         "japanese_recent_limit": 8,
+        "japanese_room_message_limit": 6,
         "autonomy_mode": "shadow",
         "autonomy_min_relevance": 75,
         "autonomy_min_technical": 75,
@@ -1195,6 +1196,42 @@ class TechnoScout:
             flush=True,
         )
 
+    def room_ja(self, room_value: str) -> None:
+        room = safe_room(room_value)
+        if not room:
+            raise ValueError(f"invalid room: {room_value}")
+        limit = max(1, min(
+            20,
+            int(self.cfg.get("japanese_room_message_limit", 6)),
+        ))
+        payload = technocore_json(
+            self.cfg,
+            f"/r/{room}",
+            {"format": "json", "limit": limit},
+        )
+        messages = room_messages(payload)
+        print(f"Room 日本語ビュー | {room} | {len(messages)} messages", flush=True)
+        for item in messages:
+            seq = seq_of(item)
+            sender = agent_id_of(item) or str(item.get("from", ""))[:80]
+            text = str(item.get("text", item.get("message", ""))).strip()
+            if not text:
+                continue
+            try:
+                ja = self._translate_ja(
+                    "room_message",
+                    f"{room}:{seq}",
+                    text,
+                )
+            except Exception as exc:
+                ja = f"[翻訳失敗: {type(exc).__name__}]"
+            print(
+                f"\nseq={seq} from={sender}\n"
+                f"EN: {text}\n"
+                f"JA: {ja}",
+                flush=True,
+            )
+
     def recent_ja(self) -> None:
         rows = recent_observations(
             self.db,
@@ -1422,6 +1459,7 @@ def main() -> None:
     modes.add_argument("--agents", action="store_true")
     modes.add_argument("--drafts", action="store_true")
     modes.add_argument("--recent-ja", action="store_true")
+    modes.add_argument("--room-ja", metavar="ROOM")
     modes.add_argument("--show-draft", type=int, metavar="ID")
     modes.add_argument("--retriage-selected", action="store_true")
     modes.add_argument("--approve-draft", type=int, metavar="ID")
@@ -1456,6 +1494,9 @@ def main() -> None:
             return
         if args.recent_ja:
             scout.recent_ja()
+            return
+        if args.room_ja is not None:
+            scout.room_ja(args.room_ja)
             return
         if args.show_draft is not None:
             scout.show_draft(args.show_draft)
