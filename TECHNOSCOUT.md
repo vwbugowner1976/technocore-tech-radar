@@ -850,3 +850,25 @@ TechnoScout sender DIDs:
     .venv/bin/python technoscout.py --room-ja ROOM
 
 Self-authored lines appear as `from=<did> [SELF]`.
+
+
+### Conservative reaction classification
+
+Reaction tracking intentionally favors false negatives over false positives.
+
+Generic protocol/status words such as `contract`, `lock`, `secret`,
+`escrow`, `candidate`, and `analysis` do not count as concrete topic
+overlap. A `flop-index` row consisting of `read kibble seq ... analysing`
+is never promoted to `LIKELY_REACTION` merely because it appears immediately
+after a TechnoScout post.
+
+A likely reaction now requires either two concrete shared technical terms within
+10 sequence positions, or one concrete shared technical term from the intended
+target agent within 20 sequence positions. Explicit reply metadata, an exact
+`Re: seq <our_seq>`, or an explicit `@<our DID>` mention is still classified
+as `DIRECT_REPLY`.
+
+Busy rooms can return a limited window that begins long after the TechnoScout
+post. When that happens the tracker reports `WINDOW_TRUNCATED` with
+`coverage=PARTIAL` rather than claiming there was only unrelated room activity.
+This means a reaction may have existed in the missing sequence range.
