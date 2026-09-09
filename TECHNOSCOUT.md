@@ -742,3 +742,21 @@ Only after the shadow decisions look appropriate, change the local ignored confi
 
 The deny rules and rate/cooldown limits still apply. Do not weaken them merely because a local model
 rates a conversation highly.
+
+
+### Autonomous-send circuit breaker
+
+Limited mode has a persistent circuit breaker. If an autonomous send raises any exception,
+TechnoScout records the error and latches a global autonomy halt in SQLite. Later drafts may still
+be discovered and stored, but autonomous sending remains stopped.
+
+Check it with:
+
+    .venv/bin/python technoscout.py --autonomy-halt-status
+
+After inspecting the affected draft and its send attempts, a human may explicitly clear the halt:
+
+    .venv/bin/python technoscout.py --resume-autonomy
+
+The halt survives process restarts and launchd restarts. Manual v0.7 permit-based sending remains a
+separate path.
