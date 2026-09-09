@@ -187,7 +187,7 @@ def load_config(path: str) -> dict[str, Any]:
         "ui_language": "ja",
         "translation_timeout_seconds": 30,
         "translation_max_tokens": 320,
-        "translation_cache_version": "ja-v2",
+        "translation_cache_version": "ja-v3",
         "japanese_recent_limit": 8,
         "japanese_room_message_limit": 6,
         "autonomy_mode": "shadow",
@@ -278,18 +278,44 @@ def normalize_japanese_display(value: str) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    jp = r"\u3040-\u30ff\u3400-\u9fff"
-    punctuation = r"、。！？：；）」』】〉》"
-    # Some small local models emit spaces between every Japanese character.
-    # Remove only spaces that are clearly internal to Japanese text, while
-    # preserving normal spacing around English identifiers/code.
-    previous = None
-    while previous != text:
-        previous = text
-        text = re.sub(rf"(?<=[{jp}])\s+(?=[{jp}{punctuation}])", "", text)
-        text = re.sub(rf"(?<=[{punctuation}])\s+(?=[{jp}])", "", text)
-    return text
 
+    def is_japanese(char: str) -> bool:
+        cp = ord(char)
+        return (
+            0x3040 <= cp <= 0x30FF
+            or 0x3400 <= cp <= 0x4DBF
+            or 0x4E00 <= cp <= 0x9FFF
+        )
+
+    japanese_punctuation = set("、。！？：；）」』】〉》「『【〈《（")
+    result: list[str] = []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if not char.isspace():
+            result.append(char)
+            i += 1
+            continue
+
+        j = i
+        while j < len(text) and text[j].isspace():
+            j += 1
+
+        previous = result[-1] if result else ""
+        following = text[j] if j < len(text) else ""
+        previous_jp = bool(previous) and (
+            is_japanese(previous) or previous in japanese_punctuation
+        )
+        following_jp = bool(following) and (
+            is_japanese(following) or following in japanese_punctuation
+        )
+
+        if not (previous_jp and following_jp):
+            if result and result[-1] != " ":
+                result.append(" ")
+        i = j
+
+    return "".join(result).strip()
 
 def seconds_since_iso(value: str) -> float | None:
     text = str(value or "").strip()
