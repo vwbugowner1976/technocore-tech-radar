@@ -935,3 +935,35 @@ reaction-memory rows after they have been synced.
 
 Reaction memory remains observational in v0.8. It does not affect autonomous
 send eligibility, target selection, or message priority.
+
+
+### Collaboration Shadow Preference
+
+Persistent reaction memory can now be compared with the existing relationship-only
+target choice without changing autonomous behavior.
+
+Defaults:
+
+    "collaboration_shadow_enabled": true
+    "collaboration_shadow_weight_percent": 35
+
+When a FOLLOW_UP_CANDIDATE contains multiple evidence agents and at least one has
+stored reaction evidence, TechnoScout computes a shadow preference using:
+
+    65% existing relationship score
+    35% persistent collaboration score
+
+The actual draft target is still selected exactly as before: highest relationship
+score among the evidence agents. The collaboration result is observation-only and
+appears in logs as either:
+
+    [collab-shadow] ... SAME ...
+    [collab-shadow] ... WOULD_PREFER ...
+
+The collaboration score grows conservatively from persisted direct replies, likely
+technical reactions, target-response success, and evidence across rooms.
+`WINDOW_TRUNCATED` samples do not count as failures.
+
+This shadow layer does not alter draft creation, autonomous eligibility, rate
+limits, room policy, or the signing/send path. Promotion into real target selection
+should wait until enough live observations show that the ranking is reliable.
