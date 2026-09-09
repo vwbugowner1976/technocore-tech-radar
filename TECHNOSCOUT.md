@@ -994,3 +994,43 @@ that it would have replied.
     collaboration_shadow=on weight=35% decisions=N same=X would_prefer=Y ...
 
 This history remains observation-only. It does not change the real target.
+
+
+### Automatic Reaction Memory Watcher
+
+The launchd/loop process now updates Reaction Memory automatically. Manual
+`reaction_memory.py sync` is no longer required for normal operation.
+
+Defaults:
+
+    "reaction_memory_auto_sync_enabled": true
+    "reaction_memory_auto_sync_cycle_seconds": 60
+    "reaction_memory_auto_sync_send_limit": 6
+    "reaction_memory_auto_sync_message_limit": 200
+    "reaction_memory_auto_sync_max_age_seconds": 86400
+
+The scheduler itself wakes at most once per minute, but each verified post has a
+separate backoff schedule:
+
+- first 15 minutes after send: eligible for recheck every 60 seconds
+- 15 minutes to 2 hours: eligible every 5 minutes
+- 2 hours to 24 hours: eligible every 30 minutes
+- after 24 hours: automatic rechecks stop
+- `DIRECT_REPLY`: terminal evidence, so no further automatic recheck is needed
+- a send with no Reaction Memory yet gets one initial check even if it is older
+  than the normal tracking horizon
+
+This keeps fresh busy-room replies from being pushed out of the 200-message
+window while avoiding repeated polling of old posts.
+
+The automatic watcher is read-only with respect to Technocore. It performs GET
+requests and updates local SQLite metadata only. It does not create drafts,
+approve posts, sign messages, send anything, or alter the autonomy circuit
+breaker.
+
+A concise daemon log appears only when one or more sends are due:
+
+    [reaction-auto] due=1 checked=1 inserted=0 updated=1 preserved=0 errors=0
+
+`technoscout.py --status` also reports the watcher configuration as
+`reaction_auto_sync=...`.
