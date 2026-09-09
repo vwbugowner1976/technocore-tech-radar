@@ -650,3 +650,95 @@ Then the first real send can stay on the normal local config with no temporary c
     .venv/bin/python technoscout.py --arm-send 2
 
 Run the one-time command printed by `--arm-send`, then paste the displayed permit at the hidden prompt.
+
+
+## TechnoScout v0.8 — Limited Autonomy + Japanese Operator View
+
+v0.8 keeps the v0.7 one-time manual sender and adds two autonomy modes:
+
+    "autonomy_mode": "shadow"
+    "autonomy_mode": "limited"
+
+`shadow` is the default. TechnoScout evaluates whether it would autonomously send, records the
+decision, but does not post.
+
+`limited` may auto-approve and auto-send only when the deterministic policy passes. The LLM does
+not get final authority over sending.
+
+Default automatic-send requirements include:
+
+- actual message evidence is required
+- relevance >= 75
+- technical >= 75
+- relationship >= 30
+- at most 3 successful sends per hour
+- 1 hour room cooldown
+- 1 hour target-agent cooldown
+- no self-replies
+- no URLs in autonomous posts
+- outbound draft must be English
+- blocked room/content terms cover governance, offers/trading, wallets/payments, credentials/secrets,
+  voting/endorsement and related higher-risk topics
+
+The manual v0.7 path remains available regardless of autonomy mode:
+
+    --approve-draft ID
+    --arm-send ID
+    --send-approved ID
+
+### Autonomy audit
+
+For a draft:
+
+    .venv/bin/python technoscout.py --autonomy-decisions ID
+
+Shadow decisions are recorded as `would_send` or `blocked`. Limited-mode attempts record
+`sent` or an error outcome. Existing send_attempts and send_permits remain the authoritative
+delivery audit.
+
+### Japanese translation
+
+Technocore posts and generated outbound drafts remain English. Japanese is an operator-only view.
+
+The translation component:
+
+- uses the local configured LLM
+- treats source text as untrusted data
+- stores the English source only in the existing source record
+- caches only the Japanese translation plus a SHA-256 source hash
+- never feeds the Japanese translation into the sender/signature path
+
+Show recent technical signal summaries in English + Japanese:
+
+    .venv/bin/python technoscout.py --recent-ja
+
+Show recent messages in one room in English + Japanese:
+
+    .venv/bin/python technoscout.py --room-ja inference-agents
+
+`--show-draft ID` also prints Japanese translations of the reason and outbound draft while the
+actual outbound draft remains the original English text.
+
+Useful defaults:
+
+    "translation_enabled": true
+    "ui_language": "ja"
+    "japanese_recent_limit": 8
+    "japanese_room_message_limit": 6
+
+### Recommended rollout
+
+First run v0.8 in shadow mode:
+
+    "autonomy_mode": "shadow"
+
+Inspect several decisions:
+
+    .venv/bin/python technoscout.py --autonomy-decisions ID
+
+Only after the shadow decisions look appropriate, change the local ignored config to:
+
+    "autonomy_mode": "limited"
+
+The deny rules and rate/cooldown limits still apply. Do not weaken them merely because a local model
+rates a conversation highly.
