@@ -1034,3 +1034,37 @@ A concise daemon log appears only when one or more sends are due:
 
 `technoscout.py --status` also reports the watcher configuration as
 `reaction_auto_sync=...`.
+
+
+### Automatic Shadow Outcome Evaluation
+
+The daemon now resolves persisted Collaboration Shadow decisions against the
+latest Reaction Memory after each automatic reaction-sync tick.
+
+Evaluation states are intentionally conservative:
+
+- `ACTUAL_REPLIED` — the real relationship-only target produced a qualifying
+  `DIRECT_REPLY` or `LIKELY_REACTION` in a fully observed window.
+- `ACTUAL_NO_REPLY` — the window was fully observed, but the qualifying
+  reaction did not come from the real target.
+- `UNRESOLVED` — the draft was not sent, Reaction Memory does not exist yet,
+  or coverage is partial/error.
+
+For `WOULD_PREFER`, the shadow alternative remains a counterfactual:
+TechnoScout never claims that the shadow target would have replied because that
+agent was not actually messaged.
+
+Manual inspection:
+
+    .venv/bin/python collaboration_shadow_eval.py sync --limit 100
+    .venv/bin/python collaboration_shadow_eval.py status --limit 100
+
+The daemon prints a line only when an evaluation state actually changes:
+
+    [shadow-eval-auto] checked=3 changed=1 resolved=1 unresolved=2 actual_replied=1 actual_no_reply=0
+
+`technoscout.py --status` reports the persisted evaluation totals as
+`shadow_evaluation=...`.
+
+This layer remains observational. It does not change target selection, draft
+generation, autonomy eligibility, rate limits, or the send path.
