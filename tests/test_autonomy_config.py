@@ -1,10 +1,17 @@
+import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from technoscout import load_config
 from technoscout.autonomy import evaluate_autonomy
+
+_MAIN_PATH = Path(__file__).resolve().parents[1] / "technoscout.py"
+_SPEC = importlib.util.spec_from_file_location("technoscout_main", _MAIN_PATH)
+_MAIN = importlib.util.module_from_spec(_SPEC)
+assert _SPEC is not None and _SPEC.loader is not None
+_SPEC.loader.exec_module(_MAIN)
+load_config = _MAIN.load_config
 
 
 class AutonomyConfigUpgradeTests(unittest.TestCase):
