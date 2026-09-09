@@ -1293,6 +1293,28 @@ class TechnoScout:
                 f"draft: {row['draft_text']}"
             )
 
+    def archive_decided_blocks(self) -> None:
+        cur = self.db.execute(
+            """
+            UPDATE reply_drafts
+            SET status='autonomy_blocked'
+            WHERE status='pending'
+              AND EXISTS (
+                SELECT 1
+                FROM autonomy_decisions a
+                WHERE a.draft_id=reply_drafts.id
+                  AND a.allowed=0
+                  AND a.outcome='blocked'
+              )
+            """
+        )
+        self.db.commit()
+        print(
+            f"Previously decided blocked drafts archived={int(cur.rowcount)} "
+            f"remaining={reply_draft_counts(self.db).get('pending',0)}",
+            flush=True,
+        )
+
     def supersede_stale_pending(self) -> None:
         rows = pending_reply_drafts(self.db, 100000)
         seen: set[tuple[str, str]] = set()
