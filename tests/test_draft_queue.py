@@ -69,6 +69,45 @@ class DraftQueueTests(unittest.TestCase):
             self.assertEqual(get_reply_draft(con, newest)["status"], "pending")
             con.close()
 
+    def test_pending_older_than_sent_is_superseded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            for seq in (10, 20, 30):
+                self.assertTrue(create_reply_draft(
+                    con,
+                    f"2026-09-09T00:00:{seq:02d}Z",
+                    "flop-index",
+                    seq,
+                    "did:key:flop-agent",
+                    100,
+                    "test",
+                    f"draft {seq}",
+                ))
+            rows = pending_reply_drafts(con, 10)
+            ids_by_seq = {int(row["through_seq"]): int(row["id"]) for row in rows}
+            con.execute(
+                "UPDATE reply_drafts SET status='sent' WHERE id=?",
+                (ids_by_seq[20],),
+            )
+            con.commit()
+
+            sent_cutoff = ids_by_seq[20]
+            for row in pending_reply_drafts(con, 10):
+                if int(row["id"]) < sent_cutoff:
+                    mark_pending_draft_status(
+                        con, int(row["id"]), "superseded"
+                    )
+            con.commit()
+            self.assertEqual(
+                get_reply_draft(con, ids_by_seq[10])["status"],
+                "superseded",
+            )
+            self.assertEqual(
+                get_reply_draft(con, ids_by_seq[30])["status"],
+                "pending",
+            )
+            con.close()
+
     def test_other_agent_is_not_superseded(self):
         with tempfile.TemporaryDirectory() as tmp:
             con = connect(Path(tmp) / "test.db")
