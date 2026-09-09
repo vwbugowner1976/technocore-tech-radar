@@ -175,6 +175,28 @@ CREATE INDEX IF NOT EXISTS idx_reaction_memory_responder
     ON reaction_memory(responder_did, classification);
 CREATE INDEX IF NOT EXISTS idx_reaction_memory_target
     ON reaction_memory(target_agent, classification);
+
+CREATE TABLE IF NOT EXISTS collaboration_shadow_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    room TEXT NOT NULL,
+    through_seq INTEGER NOT NULL,
+    marker TEXT NOT NULL,
+    actual_agent TEXT NOT NULL,
+    shadow_agent TEXT NOT NULL,
+    actual_relationship INTEGER NOT NULL DEFAULT 0,
+    shadow_relationship INTEGER NOT NULL DEFAULT 0,
+    shadow_collaboration INTEGER NOT NULL DEFAULT 0,
+    shadow_combined INTEGER NOT NULL DEFAULT 0,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    responder_direct INTEGER NOT NULL DEFAULT 0,
+    responder_likely INTEGER NOT NULL DEFAULT 0,
+    target_direct INTEGER NOT NULL DEFAULT 0,
+    target_likely INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(room, through_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_collab_shadow_marker
+    ON collaboration_shadow_decisions(marker, observed_at DESC);
 """
 
 
@@ -1162,3 +1184,87 @@ def reaction_memory_counts(con: sqlite3.Connection) -> dict[str, int]:
     ).fetchall():
         result[str(row["classification"])] = int(row["n"])
     return result
+
+
+def record_collaboration_shadow_decision(
+    con: sqlite3.Connection,
+    *,
+    observed_at: str,
+    room: str,
+    through_seq: int,
+    marker: str,
+    actual_agent: str,
+    shadow_agent: str,
+    actual_relationship: int,
+    shadow_relationship: int,
+    shadow_collaboration: int,
+    shadow_combined: int,
+    candidate_count: int,
+    responder_direct: int,
+    responder_likely: int,
+    target_direct: int,
+    target_likely: int,
+) -> bool:
+    marker = str(marker).upper()
+    if marker not in {"SAME", "WOULD_PREFER"}:
+        raise ValueError(f"invalid collaboration shadow marker: {marker}")
+    cur = con.execute(
+        """
+        INSERT OR IGNORE INTO collaboration_shadow_decisions(
+          observed_at,room,through_seq,marker,actual_agent,shadow_agent,
+          actual_relationship,shadow_relationship,shadow_collaboration,
+          shadow_combined,candidate_count,responder_direct,responder_likely,
+          target_direct,target_likely
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(observed_at),
+            str(room)[:80],
+            int(through_seq),
+            marker,
+            str(actual_agent)[:240],
+            str(shadow_agent)[:240],
+            max(0, min(100, int(actual_relationship))),
+            max(0, min(100, int(shadow_relationship))),
+            max(0, min(100, int(shadow_collaboration))),
+            max(0, min(100, int(shadow_combined))),
+            max(0, int(candidate_count)),
+            max(0, int(responder_direct)),
+            max(0, int(responder_likely)),
+            max(0, int(target_direct)),
+            max(0, int(target_likely)),
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def collaboration_shadow_counts(con: sqlite3.Connection) -> dict[str, int]:
+    result = {"SAME": 0, "WOULD_PREFER": 0}
+    for row in con.execute(
+        """
+        SELECT marker,COUNT(*) AS n
+        FROM collaboration_shadow_decisions
+        GROUP BY marker
+        """
+    ).fetchall():
+        result[str(row["marker"])] = int(row["n"])
+    return result
+
+
+def collaboration_shadow_rows(
+    con: sqlite3.Connection,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT
+          id,observed_at,room,through_seq,marker,actual_agent,shadow_agent,
+          actual_relationship,shadow_relationship,shadow_collaboration,
+          shadow_combined,candidate_count,responder_direct,responder_likely,
+          target_direct,target_likely
+        FROM collaboration_shadow_decisions
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
