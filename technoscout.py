@@ -34,6 +34,7 @@ from technoscout.common import (
 )
 from technoscout.autonomy import evaluate_autonomy
 from collaboration_shadow import shadow_candidate
+from reaction_memory import auto_sync_reaction_memory
 from technoscout.llm_backend import create_llm_backend
 from technoscout.sender import (
     ApprovedDraftSender,
@@ -198,6 +199,11 @@ def load_config(path: str) -> dict[str, Any]:
         "retriage_selected_limit": 100,
         "collaboration_shadow_enabled": True,
         "collaboration_shadow_weight_percent": 35,
+        "reaction_memory_auto_sync_enabled": True,
+        "reaction_memory_auto_sync_cycle_seconds": 60,
+        "reaction_memory_auto_sync_send_limit": 6,
+        "reaction_memory_auto_sync_message_limit": 200,
+        "reaction_memory_auto_sync_max_age_seconds": 86400,
         "sending_enabled": False,
         "send_permit_required": True,
         "send_permit_ttl_seconds": 600,
@@ -1424,6 +1430,81 @@ class TechnoScout:
                 )
                 continue
 
+    def _auto_sync_reaction_memory(self) -> None:
+        if not bool(self.cfg.get("reaction_memory_auto_sync_enabled", True)):
+            return
+
+        now_epoch = time.time()
+        cycle_seconds = max(
+            30,
+            int(self.cfg.get("reaction_memory_auto_sync_cycle_seconds", 60)),
+        )
+        last_epoch = float(
+            get_meta(self.db, "reaction_memory_auto_sync_at", "0") or 0
+        )
+        if now_epoch - last_epoch < cycle_seconds:
+            return
+
+        # Record the scheduler tick before network work so a transient failure
+        # cannot create a tight retry loop in the 2-second daemon cycle.
+        set_meta(self.db, "reaction_memory_auto_sync_at", now_epoch)
+        self.db.commit()
+
+        try:
+            stats = auto_sync_reaction_memory(
+                self.db,
+                self.cfg,
+                limit=max(
+                    1,
+                    int(
+                        self.cfg.get(
+                            "reaction_memory_auto_sync_send_limit",
+                            6,
+                        )
+                    ),
+                ),
+                message_limit=max(
+                    1,
+                    min(
+                        200,
+                        int(
+                            self.cfg.get(
+                                "reaction_memory_auto_sync_message_limit",
+                                200,
+                            )
+                        ),
+                    ),
+                ),
+                max_age_seconds=max(
+                    60,
+                    int(
+                        self.cfg.get(
+                            "reaction_memory_auto_sync_max_age_seconds",
+                            86400,
+                        )
+                    ),
+                ),
+                verbose=False,
+            )
+            if stats.get("due", 0) or stats.get("read_error", 0):
+                print(
+                    "[reaction-auto] "
+                    f"due={stats.get('due',0)} "
+                    f"checked={stats.get('checked',0)} "
+                    f"inserted={stats.get('inserted',0)} "
+                    f"updated={stats.get('updated',0)} "
+                    f"preserved={stats.get('preserved',0)} "
+                    f"errors={stats.get('read_error',0)}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"[reaction-auto] ERROR {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
     def cycle(self) -> None:
         self.seed()
         self._learn_room_acl_blocks()
@@ -1438,6 +1519,7 @@ class TechnoScout:
         self.discover()
         self.triage()
         self.watch()
+        self._auto_sync_reaction_memory()
 
     def status(self) -> None:
         total = self.db.execute("SELECT COUNT(*) n FROM rooms").fetchone()["n"]
@@ -1519,6 +1601,15 @@ class TechnoScout:
             f"same={shadow_counts.get('SAME',0)} "
             f"would_prefer={shadow_counts.get('WOULD_PREFER',0)} "
             "(observation only; target selection unchanged)",
+            flush=True,
+        )
+        print(
+            "reaction_auto_sync="
+            f"{'on' if self.cfg.get('reaction_memory_auto_sync_enabled',True) else 'off'} "
+            f"cycle={int(self.cfg.get('reaction_memory_auto_sync_cycle_seconds',60))}s "
+            f"due_limit={int(self.cfg.get('reaction_memory_auto_sync_send_limit',6))} "
+            f"window={int(self.cfg.get('reaction_memory_auto_sync_message_limit',200))} "
+            f"max_age={int(self.cfg.get('reaction_memory_auto_sync_max_age_seconds',86400))}s",
             flush=True,
         )
         for row in self.db.execute(
