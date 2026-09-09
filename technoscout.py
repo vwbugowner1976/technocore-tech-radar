@@ -1102,6 +1102,9 @@ class TechnoScout:
                         bool(self.cfg.get("draft_replies", True))
                         and action == "FOLLOW_UP_CANDIDATE"
                         and drafts_created < int(self.cfg.get("draft_max_per_cycle", 2))
+                        and not progress_only_batch_followup(
+                            room, messages, evidence
+                        )
                     ):
                         candidates = sorted(set(evidence_agents))
                         if candidates:
