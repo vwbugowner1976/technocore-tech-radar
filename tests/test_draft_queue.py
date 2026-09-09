@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from draft_queue import supersede_stale_pending
+from draft_queue import archive_decided_blocks, supersede_stale_pending
 from technoscout.db import (
     connect,
     create_reply_draft,
@@ -41,6 +41,44 @@ class DraftQueueTests(unittest.TestCase):
                     con, "autonomy_blocked", 1
                 )[0]["id"]),
                 draft_id,
+            )
+            con.close()
+
+    def test_archive_recorded_autonomy_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = connect(Path(tmp) / "test.db")
+            self.assertTrue(create_reply_draft(
+                con,
+                "2026-09-09T00:00:00Z",
+                "tclk-offers",
+                11,
+                "did:key:test",
+                70,
+                "test",
+                "Could you confirm the offer?",
+            ))
+            draft_id = int(pending_reply_drafts(con, 1)[0]["id"])
+            con.execute(
+                """
+                INSERT INTO autonomy_decisions(
+                  draft_id,decided_at,mode,allowed,reason,outcome
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    draft_id,
+                    "2026-09-09T00:00:01Z",
+                    "shadow",
+                    0,
+                    "blocked room term: tclk",
+                    "blocked",
+                ),
+            )
+            con.commit()
+            self.assertEqual(archive_decided_blocks(con), 1)
+            con.commit()
+            self.assertEqual(
+                get_reply_draft(con, draft_id)["status"],
+                "autonomy_blocked",
             )
             con.close()
 
