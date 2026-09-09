@@ -43,8 +43,10 @@ from technoscout.db import (
     agent_context,
     agent_relationship,
     autonomy_decisions_for_draft,
+    clear_autonomy_halt,
     connect,
     create_reply_draft,
+    get_autonomy_halt,
     get_meta,
     get_reply_draft,
     get_reply_draft_by_room_seq,
@@ -62,6 +64,7 @@ from technoscout.db import (
     revoke_send_permits,
     send_attempts_for_draft,
     send_permits_for_draft,
+    set_autonomy_halt,
     set_meta,
     store_translation,
     top_agents,
@@ -478,6 +481,26 @@ class TechnoScout:
         if mode == "off":
             return
 
+        halt_reason = get_autonomy_halt(self.db)
+        if halt_reason:
+            draft = get_reply_draft(self.db, draft_id)
+            if draft is not None:
+                record_autonomy_decision(
+                    self.db,
+                    draft_id,
+                    utc_now(),
+                    mode,
+                    False,
+                    f"global autonomy halt: {halt_reason}",
+                    "halted",
+                )
+                self.db.commit()
+            print(
+                f"[autonomy:{mode}] HALTED - {halt_reason}",
+                flush=True,
+            )
+            return
+
         draft = get_reply_draft(self.db, draft_id)
         if draft is None:
             return
@@ -583,15 +606,26 @@ class TechnoScout:
                 flush=True,
             )
         except Exception as exc:
+            halt_reason = (
+                f"{utc_now()} draft=#{draft_id} "
+                f"{type(exc).__name__}: {str(exc)[:500]}"
+            )
             update_autonomy_outcome(
                 self.db,
                 decision_id,
                 f"error:{type(exc).__name__}",
             )
+            set_autonomy_halt(self.db, halt_reason)
             self.db.commit()
             print(
                 f"[autonomy:limited] ERROR draft=#{draft_id}: "
                 f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(
+                "[autonomy:limited] GLOBAL HALT engaged. "
+                "Inspect the send attempt before --resume-autonomy.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1125,13 +1159,17 @@ class TechnoScout:
             "(manual approve -> arm -> one explicit send)",
             flush=True,
         )
+        halt_reason = get_autonomy_halt(self.db)
         print(
             f"autonomy_mode={self.cfg.get('autonomy_mode','shadow')} "
             f"min_rel={int(self.cfg.get('autonomy_min_relevance',75))} "
             f"min_tech={int(self.cfg.get('autonomy_min_technical',75))} "
-            f"max/hour={int(self.cfg.get('autonomy_max_sends_per_hour',3))}",
+            f"max/hour={int(self.cfg.get('autonomy_max_sends_per_hour',3))} "
+            f"halt={'ACTIVE' if halt_reason else 'clear'}",
             flush=True,
         )
+        if halt_reason:
+            print(f"autonomy_halt_reason={halt_reason}", flush=True)
         print(
             f"translation={'on' if self.cfg.get('translation_enabled',True) else 'off'} "
             f"ui_language={self.cfg.get('ui_language','ja')} "
@@ -1339,6 +1377,26 @@ class TechnoScout:
                 flush=True,
             )
 
+    def autonomy_halt_status(self) -> None:
+        reason = get_autonomy_halt(self.db)
+        if reason:
+            print(f"Autonomy HALT | ACTIVE\nreason={reason}", flush=True)
+        else:
+            print("Autonomy HALT | clear", flush=True)
+
+    def resume_autonomy(self) -> None:
+        reason = get_autonomy_halt(self.db)
+        if not reason:
+            print("Autonomy HALT already clear | no change", flush=True)
+            return
+        clear_autonomy_halt(self.db)
+        self.db.commit()
+        print(
+            "Autonomy HALT cleared by explicit human command. "
+            "The next eligible limited-mode draft may send automatically.",
+            flush=True,
+        )
+
     def diagnose_seed(self) -> None:
         env_name = str(self.cfg.get("signing_seed_env", "SIGN_SEED"))
         env_file = str(self.cfg.get("signing_env_file", ".env"))
@@ -1533,6 +1591,8 @@ def main() -> None:
     modes.add_argument("--diagnose-seed", action="store_true")
     modes.add_argument("--send-attempts", type=int, metavar="ID")
     modes.add_argument("--autonomy-decisions", type=int, metavar="ID")
+    modes.add_argument("--autonomy-halt-status", action="store_true")
+    modes.add_argument("--resume-autonomy", action="store_true")
     modes.add_argument("--send-permits", type=int, metavar="ID")
     modes.add_argument("--arm-send", type=int, metavar="ID")
     modes.add_argument("--disarm-send", type=int, metavar="ID")
@@ -1587,6 +1647,12 @@ def main() -> None:
             return
         if args.autonomy_decisions is not None:
             scout.autonomy_status(args.autonomy_decisions)
+            return
+        if args.autonomy_halt_status:
+            scout.autonomy_halt_status()
+            return
+        if args.resume_autonomy:
+            scout.resume_autonomy()
             return
         if args.send_permits is not None:
             scout.send_permits_status(args.send_permits)
