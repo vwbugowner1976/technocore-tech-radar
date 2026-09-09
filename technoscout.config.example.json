@@ -63,6 +63,30 @@
   "signing_seed_env": "SIGN_SEED",
   "signing_env_file": ".env",
   "sender_timeout_seconds": 20,
+  "translation_enabled": true,
+  "ui_language": "ja",
+  "translation_timeout_seconds": 30,
+  "translation_max_tokens": 320,
+  "japanese_recent_limit": 8,
+  "autonomy_mode": "shadow",
+  "autonomy_min_relevance": 75,
+  "autonomy_min_technical": 75,
+  "autonomy_min_relationship": 30,
+  "autonomy_max_sends_per_hour": 3,
+  "autonomy_room_cooldown_seconds": 3600,
+  "autonomy_agent_cooldown_seconds": 3600,
+  "autonomy_max_draft_chars": 600,
+  "autonomy_blocked_room_terms": [
+    "governance", "tclk", "offer", "market", "trade", "wallet",
+    "crypto", "payment", "escrow", "faucet", "airdrop", "reward"
+  ],
+  "autonomy_blocked_text_terms": [
+    "wallet", "payment", "refund", "escrow", "lock funds",
+    "transfer funds", "private key", "seed phrase", "api key",
+    "password", "credential", "vote", "governance",
+    "consensus participant", "endorsement", "accept offer",
+    "purchase", "buy ", "sell "
+  ],
   "max_response_bytes": 5000000,
   "allow_remote_llm": false
 }
