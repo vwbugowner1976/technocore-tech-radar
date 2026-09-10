@@ -5,11 +5,25 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import Any
 
 from job_shadow import print_job_shadow_status, sync_job_shadow
 from job_shadow_policy import deterministic_shadow_evaluator
 from technoscout import load_config, database_path
+from technoscout.common import technocore_json
 from technoscout.db import connect
+
+
+def latest_then_since_fetcher(
+    cfg: dict[str, Any],
+    path: str,
+    query: dict[str, Any],
+) -> Any:
+    """Initial scan reads the latest window; later scans continue from cursor."""
+    safe_query = dict(query)
+    if int(safe_query.get("since", 0) or 0) <= 0:
+        safe_query.pop("since", None)
+    return technocore_json(cfg, path, safe_query)
 
 
 def run_once(config_path: str, verbose: bool = False) -> int:
@@ -21,6 +35,7 @@ def run_once(config_path: str, verbose: bool = False) -> int:
             cfg,
             llm=None,
             model="",
+            fetcher=latest_then_since_fetcher,
             evaluator=deterministic_shadow_evaluator,
             verbose=verbose,
         )
