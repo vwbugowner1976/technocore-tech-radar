@@ -9,9 +9,9 @@ from typing import Any
 
 from job_shadow import print_job_shadow_status, sync_job_shadow
 from job_shadow_policy import deterministic_shadow_evaluator
-from technoscout import load_config, database_path
 from technoscout.common import technocore_json
 from technoscout.db import connect
+from technoscout_cli import database_path, load_config
 
 
 def latest_then_since_fetcher(
