@@ -1068,3 +1068,46 @@ The daemon prints a line only when an evaluation state actually changes:
 
 This layer remains observational. It does not change target selection, draft
 generation, autonomy eligibility, rate limits, or the send path.
+
+
+### Collaboration Progress Gate
+
+`collaboration_progress_gate.py` is a read-only promotion gate for the
+collaboration-aware target selector. It does not enable or modify autonomous
+targeting.
+
+Default minimum evidence:
+
+    verified sends: 30
+    Reaction Memory rows: 25
+    fully observed windows: 15
+    DIRECT_REPLY: 2
+    qualifying reactions (DIRECT + LIKELY): 5
+    shadow decisions: 10
+    resolved shadow evaluations: 8
+    WOULD_PREFER disagreements: 3
+    resolved WOULD_PREFER outcomes: 2
+    opportunity rate: 60%
+
+The opportunity rate is the share of resolved `WOULD_PREFER` cases where the
+relationship-only actual target did not produce a qualifying observed reply.
+This is only suggestive evidence: the alternative shadow target was not
+messaged, so the gate can become `READY_FOR_CONTROLLED_TRIAL`, never
+"proven better".
+
+States:
+
+- `COLLECTING` — baseline evidence is still below one or more thresholds.
+- `NO_MATERIAL_DIFFERENCE` — enough baseline data, but shadow almost always
+  chooses the same target as the existing selector.
+- `WAITING_FOR_DISAGREEMENT_OUTCOMES` — disagreements exist but too few real
+  actual-target outcomes are resolved.
+- `HOLD` — the existing target still replies often when shadow disagrees.
+- `READY_FOR_CONTROLLED_TRIAL` — enough evidence exists to design a separate,
+  bounded trial. This state does not alter production behavior.
+
+Inspect manually:
+
+    .venv/bin/python collaboration_progress_gate.py
+
+`technoscout.py --status` also shows the current gate state.
