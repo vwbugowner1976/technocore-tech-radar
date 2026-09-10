@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import re
-import time
 from typing import Any, Callable
 
 from technoscout.common import (
@@ -18,13 +17,7 @@ from technoscout.common import (
     technocore_json,
     utc_now,
 )
-from technoscout.db import (
-    connect,
-    job_shadow_counts,
-    job_shadow_rows,
-    record_job_shadow_candidate,
-    update_job_shadow_lifecycle,
-)
+from technoscout.db import connect
 from technoscout.sender import SigningIdentity
 from technoscout_cli import database_path, load_config
 
@@ -41,11 +34,49 @@ JOB_CLASSES = {
     "NOT_RELEVANT",
     "SKIP_CLOSED",
 }
-JOB_LIFECYCLES = {"OPEN", "CLAIMED", "DELIVERED", "ATTESTED", "UNKNOWN"}
 EFFORT_VALUES = {"tiny", "small", "medium", "large", "unknown"}
+LIFECYCLE_RANK = {
+    "UNKNOWN": 0,
+    "OPEN": 1,
+    "CLAIMED": 2,
+    "DELIVERED": 3,
+    "ATTESTED": 4,
+}
 
-# These terms are deliberately stricter than chat autonomy. Job Scout is not
-# the place to learn transaction handling, credential use, or asset movement.
+JOB_SHADOW_SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_shadow_candidates (
+    room TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    job_seq INTEGER NOT NULL,
+    issuer_did TEXT NOT NULL DEFAULT '',
+    signed_identity INTEGER NOT NULL DEFAULT 0,
+    job_type TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL,
+    lifecycle TEXT NOT NULL DEFAULT 'UNKNOWN',
+    fit_class TEXT NOT NULL DEFAULT 'LOW_CONFIDENCE',
+    relevance INTEGER NOT NULL DEFAULT 0,
+    technical_fit INTEGER NOT NULL DEFAULT 0,
+    confidence INTEGER NOT NULL DEFAULT 0,
+    effort TEXT NOT NULL DEFAULT 'unknown',
+    required_capabilities_json TEXT NOT NULL DEFAULT '[]',
+    reason TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    evaluation_count INTEGER NOT NULL DEFAULT 0,
+    last_evaluated_at TEXT,
+    PRIMARY KEY(room, job_id)
+);
+CREATE INDEX IF NOT EXISTS idx_job_shadow_fit
+    ON job_shadow_candidates(fit_class, technical_fit DESC, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_job_shadow_lifecycle
+    ON job_shadow_candidates(lifecycle, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_job_shadow_issuer
+    ON job_shadow_candidates(issuer_did, last_seen_at DESC);
+"""
+
+# Stricter than chat autonomy: the first job phase must not learn transaction,
+# credential, secret, faucet, reward, or asset-moving behavior.
 BLOCKED_JOB_TERMS = (
     "private key",
     "seed phrase",
@@ -92,8 +123,12 @@ Return JSON only:
 """.strip()
 
 
+def ensure_job_shadow_schema(con: Any) -> None:
+    con.executescript(JOB_SHADOW_SCHEMA)
+
+
 def parse_kibble_message(text: Any) -> dict[str, str] | None:
-    """Parse only the strict one-line Kibble v1 records we understand."""
+    """Parse only strict one-line Kibble v1 records we understand."""
     if not isinstance(text, str):
         return None
     head = text.split(" | ", 1)
@@ -143,8 +178,8 @@ def sender_of(message: dict[str, Any]) -> str:
 
 
 def signed_did(sender: str) -> bool:
-    # Server JSON uses did:key for verified signed writers; anonymous nicknames
-    # are not eligible job issuers for any future live mode.
+    # JSON from Technocore exposes signed writers as did:key. Anonymous nicknames
+    # are observable but can never become eligible job issuers in a future live mode.
     return str(sender).startswith("did:key:z6Mk")
 
 
@@ -173,12 +208,15 @@ def lifecycle_for_job(
         if not parsed or parsed.get("job_id") != job_id:
             continue
         verb = parsed["verb"]
-        if verb == "CLAIM":
-            lifecycle = "CLAIMED"
-        elif verb in {"RESULT", "DELIVER"}:
-            lifecycle = "DELIVERED"
-        elif verb in {"ATTEST", "WITNESS"}:
-            lifecycle = "ATTESTED"
+        candidate = {
+            "CLAIM": "CLAIMED",
+            "RESULT": "DELIVERED",
+            "DELIVER": "DELIVERED",
+            "ATTEST": "ATTESTED",
+            "WITNESS": "ATTESTED",
+        }.get(verb, "UNKNOWN")
+        if LIFECYCLE_RANK[candidate] > LIFECYCLE_RANK[lifecycle]:
+            lifecycle = candidate
     return lifecycle
 
 
@@ -201,8 +239,11 @@ def normalize_eval(result: dict[str, Any]) -> dict[str, Any]:
     effort = str(result.get("effort", "unknown")).strip().lower()
     if effort not in EFFORT_VALUES:
         effort = "unknown"
-    capabilities = []
-    for value in result.get("required_capabilities", []):
+    capabilities: list[str] = []
+    values = result.get("required_capabilities", [])
+    if not isinstance(values, list):
+        values = []
+    for value in values:
         label = re.sub(r"[^a-z0-9_.+-]", "-", str(value).strip().lower())[:40]
         label = label.strip("-")
         if label and label not in capabilities:
@@ -295,6 +336,152 @@ def _own_did(cfg: dict[str, Any]) -> str:
         return ""
 
 
+def record_job_shadow_candidate(
+    con: Any,
+    *,
+    seen_at: str,
+    room: str,
+    job_id: str,
+    job_seq: int,
+    issuer_did: str,
+    signed_identity: bool,
+    job_type: str,
+    digest: str,
+    lifecycle: str,
+    evaluation: dict[str, Any],
+) -> str:
+    ensure_job_shadow_schema(con)
+    existing = con.execute(
+        "SELECT evaluation_count FROM job_shadow_candidates WHERE room=? AND job_id=?",
+        (room, job_id),
+    ).fetchone()
+    action = "inserted" if existing is None else "updated"
+    previous_count = int(existing["evaluation_count"]) if existing else 0
+    con.execute(
+        """
+        INSERT INTO job_shadow_candidates(
+          room,job_id,first_seen_at,last_seen_at,job_seq,issuer_did,
+          signed_identity,job_type,content_hash,lifecycle,fit_class,relevance,
+          technical_fit,confidence,effort,required_capabilities_json,reason,
+          summary,evaluation_count,last_evaluated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(room,job_id) DO UPDATE SET
+          last_seen_at=excluded.last_seen_at,
+          job_seq=excluded.job_seq,
+          issuer_did=excluded.issuer_did,
+          signed_identity=excluded.signed_identity,
+          job_type=excluded.job_type,
+          content_hash=excluded.content_hash,
+          lifecycle=excluded.lifecycle,
+          fit_class=excluded.fit_class,
+          relevance=excluded.relevance,
+          technical_fit=excluded.technical_fit,
+          confidence=excluded.confidence,
+          effort=excluded.effort,
+          required_capabilities_json=excluded.required_capabilities_json,
+          reason=excluded.reason,
+          summary=excluded.summary,
+          evaluation_count=excluded.evaluation_count,
+          last_evaluated_at=excluded.last_evaluated_at
+        """,
+        (
+            room[:80],
+            job_id,
+            seen_at,
+            seen_at,
+            int(job_seq),
+            issuer_did[:240],
+            1 if signed_identity else 0,
+            job_type[:40],
+            digest,
+            lifecycle,
+            str(evaluation["fit_class"]),
+            int(evaluation["relevance"]),
+            int(evaluation["technical_fit"]),
+            int(evaluation["confidence"]),
+            str(evaluation["effort"]),
+            json.dumps(evaluation["required_capabilities"], ensure_ascii=False),
+            str(evaluation["reason"])[:500],
+            str(evaluation["summary"])[:600],
+            previous_count + 1,
+            seen_at,
+        ),
+    )
+    return action
+
+
+def update_job_shadow_lifecycle(
+    con: Any,
+    *,
+    room: str,
+    job_id: str,
+    lifecycle: str,
+    seen_at: str,
+) -> bool:
+    ensure_job_shadow_schema(con)
+    row = con.execute(
+        "SELECT lifecycle FROM job_shadow_candidates WHERE room=? AND job_id=?",
+        (room, job_id),
+    ).fetchone()
+    if row is None:
+        return False
+    current = str(row["lifecycle"])
+    if LIFECYCLE_RANK.get(lifecycle, 0) <= LIFECYCLE_RANK.get(current, 0):
+        con.execute(
+            "UPDATE job_shadow_candidates SET last_seen_at=? WHERE room=? AND job_id=?",
+            (seen_at, room, job_id),
+        )
+        return False
+    con.execute(
+        "UPDATE job_shadow_candidates SET lifecycle=?,last_seen_at=? WHERE room=? AND job_id=?",
+        (lifecycle, seen_at, room, job_id),
+    )
+    return True
+
+
+def job_shadow_counts(con: Any) -> dict[str, int]:
+    ensure_job_shadow_schema(con)
+    result = {
+        "total": 0,
+        "OPEN": 0,
+        "CLAIMED": 0,
+        "DELIVERED": 0,
+        "ATTESTED": 0,
+        "UNKNOWN": 0,
+    }
+    for job_class in JOB_CLASSES:
+        result[job_class] = 0
+    result["total"] = int(
+        con.execute("SELECT COUNT(*) AS n FROM job_shadow_candidates").fetchone()["n"]
+    )
+    for row in con.execute(
+        "SELECT lifecycle,COUNT(*) AS n FROM job_shadow_candidates GROUP BY lifecycle"
+    ).fetchall():
+        result[str(row["lifecycle"])] = int(row["n"])
+    for row in con.execute(
+        "SELECT fit_class,COUNT(*) AS n FROM job_shadow_candidates GROUP BY fit_class"
+    ).fetchall():
+        result[str(row["fit_class"])] = int(row["n"])
+    return result
+
+
+def job_shadow_rows(con: Any, limit: int = 20) -> list[Any]:
+    ensure_job_shadow_schema(con)
+    return con.execute(
+        """
+        SELECT room,job_id,first_seen_at,last_seen_at,job_seq,issuer_did,
+               signed_identity,job_type,content_hash,lifecycle,fit_class,
+               relevance,technical_fit,confidence,effort,
+               required_capabilities_json,reason,summary,evaluation_count,
+               last_evaluated_at
+        FROM job_shadow_candidates
+        ORDER BY job_seq DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+
 def sync_job_shadow(
     con: Any,
     cfg: dict[str, Any],
@@ -305,7 +492,8 @@ def sync_job_shadow(
     evaluator: Callable[..., dict[str, Any]] | None = None,
     verbose: bool = False,
 ) -> dict[str, int]:
-    """Read new Kibble records, update lifecycle, and shadow-score new JOBs."""
+    """Read new Kibble records, update lifecycle, and shadow-score JOBs."""
+    ensure_job_shadow_schema(con)
     stats = {
         "messages": 0,
         "jobs": 0,
@@ -336,86 +524,86 @@ def sync_job_shadow(
 
     own_did = _own_did(cfg)
     highest_seq = cursor
+    oldest_deferred_job_seq: int | None = None
 
-    # First pass updates lifecycle for jobs we already know. No LLM needed.
+    # First pass: advance lifecycle for already-known jobs without an LLM call.
     for message in messages:
-        highest_seq = max(highest_seq, seq_of(message))
         parsed = parse_kibble_message(message.get("text", message.get("message", "")))
         if parsed is None:
             stats["parse_ignored"] += 1
             continue
-        if parsed["verb"] != "JOB":
-            lifecycle = {
-                "CLAIM": "CLAIMED",
-                "RESULT": "DELIVERED",
-                "DELIVER": "DELIVERED",
-                "ATTEST": "ATTESTED",
-                "WITNESS": "ATTESTED",
-            }.get(parsed["verb"], "UNKNOWN")
-            if update_job_shadow_lifecycle(
+        if parsed["verb"] == "JOB":
+            continue
+        lifecycle = {
+            "CLAIM": "CLAIMED",
+            "RESULT": "DELIVERED",
+            "DELIVER": "DELIVERED",
+            "ATTEST": "ATTESTED",
+            "WITNESS": "ATTESTED",
+        }.get(parsed["verb"], "UNKNOWN")
+        if update_job_shadow_lifecycle(
+            con,
+            room=room,
+            job_id=parsed["job_id"],
+            lifecycle=lifecycle,
+            seen_at=utc_now(),
+        ):
+            stats["lifecycle_updates"] += 1
+
+    # Oldest first makes the cursor resumable if the evaluation cap is reached.
+    seen_job_ids: set[str] = set()
+    for message in messages:
+        message_seq = seq_of(message)
+        parsed = parse_kibble_message(message.get("text", message.get("message", "")))
+        if not parsed or parsed["verb"] != "JOB":
+            highest_seq = max(highest_seq, message_seq)
+            continue
+        if parsed["job_id"] in seen_job_ids:
+            highest_seq = max(highest_seq, message_seq)
+            continue
+        seen_job_ids.add(parsed["job_id"])
+        stats["jobs"] += 1
+        digest = content_hash(parsed)
+        existing = con.execute(
+            "SELECT content_hash,evaluation_count FROM job_shadow_candidates WHERE room=? AND job_id=?",
+            (room, parsed["job_id"]),
+        ).fetchone()
+        needs_evaluation = (
+            existing is None
+            or str(existing["content_hash"]) != digest
+            or int(existing["evaluation_count"] or 0) == 0
+        )
+        lifecycle = lifecycle_for_job(parsed["job_id"], message_seq, messages)
+
+        if not needs_evaluation:
+            update_job_shadow_lifecycle(
                 con,
                 room=room,
                 job_id=parsed["job_id"],
                 lifecycle=lifecycle,
                 seen_at=utc_now(),
-            ):
-                stats["lifecycle_updates"] += 1
-
-    job_messages = []
-    seen_job_ids: set[str] = set()
-    for message in messages:
-        parsed = parse_kibble_message(message.get("text", message.get("message", "")))
-        if not parsed or parsed["verb"] != "JOB":
+            )
+            highest_seq = max(highest_seq, message_seq)
             continue
-        if parsed["job_id"] in seen_job_ids:
-            continue
-        seen_job_ids.add(parsed["job_id"])
-        job_messages.append((message, parsed))
 
-    # Newest jobs first, but keep a hard LLM cap per cycle.
-    job_messages.sort(key=lambda item: seq_of(item[0]), reverse=True)
-    for message, job in job_messages:
-        stats["jobs"] += 1
-        job_seq = seq_of(message)
+        if stats["evaluated"] >= eval_limit:
+            oldest_deferred_job_seq = message_seq
+            break
+
         sender = sender_of(message)
-        lifecycle = lifecycle_for_job(job["job_id"], job_seq, messages)
-        existing = con.execute(
-            "SELECT content_hash FROM job_shadow_candidates WHERE room=? AND job_id=?",
-            (room, job["job_id"]),
-        ).fetchone()
-        digest = content_hash(job)
-        should_evaluate = (
-            existing is None
-            or str(existing["content_hash"]) != digest
-        )
-
-        if should_evaluate and stats["evaluated"] < eval_limit:
-            try:
-                evaluation = evaluate_job(
-                    cfg,
-                    llm,
-                    model,
-                    job,
-                    sender=sender,
-                    own_did=own_did,
-                    lifecycle=lifecycle,
-                    evaluator=evaluator,
-                )
-                stats["evaluated"] += 1
-            except Exception as exc:
-                stats["errors"] += 1
-                evaluation = {
-                    "fit_class": "LOW_CONFIDENCE",
-                    "relevance": 0,
-                    "technical_fit": 0,
-                    "confidence": 0,
-                    "effort": "unknown",
-                    "required_capabilities": [],
-                    "reason": f"evaluation error: {type(exc).__name__}",
-                    "summary": "",
-                }
-        elif existing is None:
-            # Preserve discovery without pretending it was evaluated.
+        try:
+            evaluation = evaluate_job(
+                cfg,
+                llm,
+                model,
+                parsed,
+                sender=sender,
+                own_did=own_did,
+                lifecycle=lifecycle,
+                evaluator=evaluator,
+            )
+        except Exception as exc:
+            stats["errors"] += 1
             evaluation = {
                 "fit_class": "LOW_CONFIDENCE",
                 "relevance": 0,
@@ -423,55 +611,46 @@ def sync_job_shadow(
                 "confidence": 0,
                 "effort": "unknown",
                 "required_capabilities": [],
-                "reason": "queued for a later shadow evaluation cycle",
+                "reason": f"evaluation error: {type(exc).__name__}",
                 "summary": "",
             }
-        else:
-            # Existing unchanged jobs need lifecycle refresh only.
-            update_job_shadow_lifecycle(
-                con,
-                room=room,
-                job_id=job["job_id"],
-                lifecycle=lifecycle,
-                seen_at=utc_now(),
-            )
-            continue
-
+        stats["evaluated"] += 1
         action = record_job_shadow_candidate(
             con,
             seen_at=utc_now(),
             room=room,
-            job_id=job["job_id"],
-            job_seq=job_seq,
+            job_id=parsed["job_id"],
+            job_seq=message_seq,
             issuer_did=sender,
             signed_identity=signed_did(sender),
-            job_type=job["job_type"],
-            content_hash=digest,
+            job_type=parsed["job_type"],
+            digest=digest,
             lifecycle=lifecycle,
-            fit_class=evaluation["fit_class"],
-            relevance=evaluation["relevance"],
-            technical_fit=evaluation["technical_fit"],
-            confidence=evaluation["confidence"],
-            effort=evaluation["effort"],
-            required_capabilities=evaluation["required_capabilities"],
-            reason=evaluation["reason"],
-            summary=evaluation["summary"],
-            evaluated=should_evaluate and stats["evaluated"] <= eval_limit,
+            evaluation=evaluation,
         )
         stats[action] += 1
+        highest_seq = max(highest_seq, message_seq)
+
         if verbose:
             print(
-                f"[job-shadow] {job['job_id']} type={job['job_type']} "
+                f"[job-shadow] {parsed['job_id']} type={parsed['job_type']} "
                 f"lifecycle={lifecycle} class={evaluation['fit_class']} "
                 f"fit={evaluation['technical_fit']} conf={evaluation['confidence']} "
                 f"issuer={sender[:28]}",
                 flush=True,
             )
 
+    # Never skip an unevaluated JOB. If the per-cycle cap was reached, resume
+    # just before that JOB next time; duplicate non-JOB records are harmless.
+    next_cursor = (
+        max(cursor, oldest_deferred_job_seq - 1)
+        if oldest_deferred_job_seq is not None
+        else max(highest_seq, max((seq_of(m) for m in messages), default=cursor))
+    )
     con.execute(
         "INSERT INTO meta(key,value) VALUES(?,?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (cursor_key, str(highest_seq)),
+        (cursor_key, str(next_cursor)),
     )
     con.commit()
     return stats
@@ -489,7 +668,10 @@ def print_job_shadow_status(con: Any, limit: int = 20) -> None:
         f"low_conf={counts.get('LOW_CONFIDENCE',0)}"
     )
     for row in job_shadow_rows(con, limit):
-        capabilities = json.loads(str(row["required_capabilities_json"] or "[]"))
+        try:
+            capabilities = json.loads(str(row["required_capabilities_json"] or "[]"))
+        except json.JSONDecodeError:
+            capabilities = []
         print(
             f"  {row['job_id']} room={row['room']} seq={row['job_seq']} "
             f"type={row['job_type']} lifecycle={row['lifecycle']} "
