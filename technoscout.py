@@ -35,6 +35,7 @@ from technoscout.common import (
 from technoscout.autonomy import evaluate_autonomy
 from collaboration_shadow import shadow_candidate
 from collaboration_shadow_eval import sync_shadow_evaluations
+from collaboration_progress_gate import evaluate_from_db
 from reaction_memory import auto_sync_reaction_memory
 from technoscout.llm_backend import create_llm_backend
 from technoscout.sender import (
@@ -1562,6 +1563,7 @@ class TechnoScout:
             self.db
         )
         shadow_eval_total = sum(shadow_eval_counts.values())
+        collaboration_gate = evaluate_from_db(self.db, self.cfg)
         print(
             f"TechnoScout v0.8 | rooms={total} selected={selected} pending={pending} "
             f"signals={signals} drafts=p{draft_counts.get('pending',0)}/"
@@ -1641,6 +1643,13 @@ class TechnoScout:
             f"no_reply:{shadow_eval_counts.get('ACTUAL_NO_REPLY',0)} "
             f"unresolved:{shadow_eval_counts.get('UNRESOLVED',0)} "
             "(observation only)",
+            flush=True,
+        )
+        print(
+            "collaboration_gate="
+            f"{collaboration_gate.state} "
+            f"ready={'yes' if collaboration_gate.ready_for_controlled_trial else 'no'} "
+            "(trial gate only; no target-selection change)",
             flush=True,
         )
         for row in self.db.execute(
