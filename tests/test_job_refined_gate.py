@@ -19,7 +19,6 @@ class RefinedJobGateTests(unittest.TestCase):
         # Enough global baseline and strong issuer lifecycle evidence.
         for index in range(60):
             issuer = self.issuer if index < 3 else f"did:key:z6Mkissuer{index:03d}"
-            lifecycle = "ATTESTED" if index < 55 else "OPEN"
             record_job_shadow_candidate(
                 self.con,
                 seen_at=self.now,
@@ -30,21 +29,21 @@ class RefinedJobGateTests(unittest.TestCase):
                 signed_identity=True,
                 job_type="explain",
                 digest=f"d{index}",
-                lifecycle=lifecycle,
+                lifecycle="ATTESTED",
                 evaluation={
-                    "fit_class": "SKIP_CLOSED" if lifecycle != "OPEN" else "NOT_RELEVANT",
-                    "relevance": 0 if lifecycle != "OPEN" else 25,
-                    "technical_fit": 0 if lifecycle != "OPEN" else 30,
-                    "confidence": 100 if lifecycle != "OPEN" else 65,
-                    "effort": "unknown" if lifecycle != "OPEN" else "small",
+                    "fit_class": "SKIP_CLOSED",
+                    "relevance": 0,
+                    "technical_fit": 0,
+                    "confidence": 100,
+                    "effort": "unknown",
                     "required_capabilities": [],
                     "reason": "fixture",
                     "summary": "",
                 },
             )
 
-        # Add enough OPEN rows to satisfy the default board baseline.
-        for index in range(60, 80):
+        # 60 OPEN rows => observed=120 before the refined candidate is added.
+        for index in range(60, 120):
             record_job_shadow_candidate(
                 self.con,
                 seen_at=self.now,
