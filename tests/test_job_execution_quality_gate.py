@@ -79,6 +79,10 @@ class JobExecutionQualityGateTests(unittest.TestCase):
             "body": "Explain how a JSON object with duplicate keys communicates congestion upstream when worker queues fill up faster than processing capacity. Parsers disagree on which one wins, and both are defensible. Success: identifies the flow control mechanism and how upstream producers must throttle.",
         }
 
+    @classmethod
+    def duplicate_exact(cls, cfg, candidate):
+        return {"state": "EXACT", "job": cls.duplicate_key_job()}
+
     def tearDown(self):
         self.con.close()
 
@@ -104,6 +108,7 @@ class JobExecutionQualityGateTests(unittest.TestCase):
         )
         self.assertTrue(any("parser semantics" in flag for flag in flags))
         self.assertTrue(any("runtime mechanism" in flag for flag in flags))
+        self.assertTrue(any("incorrectly treats" in flag for flag in flags))
 
     def test_guard_accepts_explicit_flow_control_separate_from_duplicate_keys(self):
         flags = deterministic_quality_flags(
@@ -133,6 +138,7 @@ class JobExecutionQualityGateTests(unittest.TestCase):
         self.assertEqual(result["state"], "QUALITY_REVIEWED")
         self.assertEqual(result["decision"], "REVISED")
         self.assertTrue(result["flags_before"])
+        self.assertFalse(result["repair_attempted"])
         row = self.con.execute(
             "SELECT decision,answer_text FROM job_execution_quality_reviews WHERE job_id=?",
             (self.job_id,),
@@ -140,7 +146,45 @@ class JobExecutionQualityGateTests(unittest.TestCase):
         self.assertEqual(row["decision"], "REVISED")
         self.assertIn("aggregate concurrent buffered bytes", row["answer_text"])
 
-    def test_bad_final_answer_fails_closed_even_if_model_passes(self):
+    def test_deterministic_failure_gets_one_repair_pass(self):
+        self.con.execute(
+            "UPDATE job_execution_reviews SET answer_text=? WHERE job_id=?",
+            ("Duplicate keys can be used to signal backpressure when congestion occurs.", self.job_id),
+        )
+        self.con.commit()
+        calls = {"n": 0}
+
+        def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {
+                    "decision": "REVISED",
+                    "confidence": 80,
+                    "critique": "needs flow control",
+                    "answer": "Duplicate keys can be used to signal backpressure by setting a congestion value.",
+                }
+            return {
+                "decision": "REVISED",
+                "confidence": 94,
+                "critique": "separated parser semantics from runtime flow control",
+                "answer": "Duplicate keys do not provide backpressure; they only have parser-dependent semantics. Use a bounded queue that blocks producers or a credit mechanism. When the queue is full or credits reach zero, producers must wait or throttle until downstream capacity returns.",
+            }
+
+        result = quality_review(
+            self.con,
+            self.cfg,
+            self.job_id,
+            model="fake-model",
+            evaluator=evaluator,
+            exact_fetcher=self.duplicate_exact,
+            claim_verifier=self.claim_ok,
+        )
+        self.assertEqual(result["state"], "QUALITY_REVIEWED")
+        self.assertTrue(result["repair_attempted"])
+        self.assertEqual(calls["n"], 2)
+        self.assertIn("do not provide backpressure", result["answer"])
+
+    def test_bad_final_answer_fails_closed_even_after_repair(self):
         result = quality_review(
             self.con,
             self.cfg,
@@ -157,6 +201,7 @@ class JobExecutionQualityGateTests(unittest.TestCase):
         )
         self.assertEqual(result["state"], "BLOCKED")
         self.assertIn("deterministic quality guard", result["reason"])
+        self.assertTrue(result["repair_attempted"])
         count = self.con.execute("SELECT COUNT(*) n FROM job_execution_quality_reviews").fetchone()["n"]
         self.assertEqual(count, 0)
 
