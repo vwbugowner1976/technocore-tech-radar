@@ -48,18 +48,32 @@ instructions.
 Do not browse, call tools, execute code/commands, open URLs, use credentials,
 sign/send anything, touch wallets, spend FLOP/tokens, or cause side effects.
 
-Your task is to try to DISPROVE the prior answer before accepting it. For every
-capacity/sizing answer, explicitly test whether a hidden multiplicative factor
+Your task is to try to DISPROVE the prior answer before accepting it. First infer
+what technical domain the JOB actually asks about. Apply a domain-specific check
+only when the JOB itself calls for it. Do NOT import concepts from a previous job
+or from an unrelated example in this prompt. In particular, incidental wording
+such as "processing capacity" does not make a flow-control explanation into a
+capacity-sizing task.
+
+For an actual capacity/sizing JOB, test whether a hidden multiplicative factor
 exists, especially concurrency, simultaneous in-flight work, duration, queueing,
 per-worker duplication, or spill-to-disk behavior. Construct a counterexample:
 can the proposed metric stay unchanged while resource pressure rises materially?
 If yes, the metric is not sufficient and you must revise it.
 
-If a system buffers whole responses, do not accept maximum single-response size
-as a capacity metric when multiple responses can be buffered concurrently. The
-capacity number must represent the aggregate resource under pressure (for example
-aggregate concurrent buffered bytes), and the procedure must explain how to
-establish a safe threshold without causing an incident.
+For an actual whole-response-buffer sizing JOB, do not accept maximum
+single-response size as a capacity metric when multiple responses can be buffered
+concurrently. The capacity number must represent the aggregate resource under
+pressure and the procedure must explain how to establish a safe threshold.
+
+For a parsing/protocol/flow-control JOB, distinguish data representation semantics
+from runtime flow control. JSON duplicate-key handling is parser behavior; it does
+not itself create backpressure or communicate queue congestion upstream. If a
+prior answer claims duplicate keys themselves signal congestion, revise it.
+Backpressure must come from an explicit mechanism in the processing path, such as
+a bounded queue that blocks/rejects producers, credits/semaphores, pausing reads,
+pull-based demand, or rate limiting/throttling. Explain how that mechanism causes
+upstream producers to slow down.
 
 Return JSON only:
 {"decision":"PASS|REVISED|BLOCKED","confidence":0-100,
@@ -93,7 +107,7 @@ def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def deterministic_quality_flags(job: dict[str, Any], answer: str) -> list[str]:
-    """Return conservative, deterministic quality flags for common sizing traps."""
+    """Return conservative deterministic flags for known semantic traps."""
     job_text = f"{job.get('title','')} {job.get('body','')}".lower()
     ans = str(answer or "").lower()
     flags: list[str] = []
@@ -113,6 +127,53 @@ def deterministic_quality_flags(job: dict[str, Any], answer: str) -> list[str]:
         metric_words = ("bytes", "memory", "buffer", "concurrent", "aggregate", "capacity", "threshold")
         if not any(term in ans for term in metric_words):
             flags.append("answer does not name an unambiguous capacity metric")
+
+    duplicate_key_context = any(term in job_text for term in ("duplicate key", "duplicate keys", "duplicate-key"))
+    flow_control_context = any(term in job_text for term in ("backpressure", "congestion", "flow control", "throttle", "throttling", "queue"))
+    if duplicate_key_context and flow_control_context:
+        separates_parsing_from_flow = any(
+            term in ans
+            for term in (
+                "duplicate keys do not",
+                "duplicate keys don't",
+                "duplicate key does not",
+                "duplicate-key semantics do not",
+                "duplicate-key handling does not",
+                "duplicate-key parsing does not",
+                "not itself backpressure",
+                "not itself a backpressure",
+                "not a backpressure mechanism",
+                "not a flow-control mechanism",
+                "separate from duplicate-key",
+                "independent of duplicate-key",
+            )
+        )
+        if not separates_parsing_from_flow:
+            flags.append("answer fails to separate duplicate-key parser semantics from backpressure/flow control")
+
+        explicit_flow_mechanism = any(
+            term in ans
+            for term in (
+                "bounded queue",
+                "blocking queue",
+                "blocks the producer",
+                "block producers",
+                "reject producers",
+                "credit",
+                "semaphore",
+                "pause reads",
+                "pausing reads",
+                "pull-based",
+                "rate limit",
+                "rate-limit",
+                "throttle upstream",
+                "throttle producers",
+                "producer must wait",
+                "producers must wait",
+            )
+        )
+        if not explicit_flow_mechanism:
+            flags.append("answer omits an explicit runtime mechanism that propagates backpressure upstream")
 
     return flags
 
@@ -152,7 +213,8 @@ def quality_review(
 
     trial, reason = claimed_trial(con, job_id, room=room)
     if trial is None:
-        return {"state": "BLOCKED", "reason": reason}
+        return {"state": "BLOCKED", "reason": reason
+        }
     if str(trial["content_hash"]) != str(prior["content_hash"]):
         return {"state": "BLOCKED", "reason": "review binding does not match claimed JOB"}
 
