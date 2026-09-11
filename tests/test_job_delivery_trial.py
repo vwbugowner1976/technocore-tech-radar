@@ -1,6 +1,7 @@
 import hashlib
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from job_claim_trial import ensure_claim_schema
 from job_delivery_trial import (
@@ -37,7 +38,7 @@ class FakeSender:
 
 class JobDeliveryTrialTests(unittest.TestCase):
     def setUp(self):
-        self.con = connect(":memory:")
+        self.con = connect(Path(":memory:"))
         ensure_claim_schema(self.con)
         ensure_quality_schema(self.con)
         ensure_delivery_schema(self.con)
