@@ -3,9 +3,15 @@
 
 Kibble can advance by more than one normal room-read window between observing a
 JOB and checking it. A ``?since=`` tail alone can therefore omit the original
-JOB even while that record is still retained. This module first verifies a
-byte-retained room snapshot via ``/export``, then catches up from the snapshot's
-highest seq using bounded incremental reads.
+JOB even while that record is still retained. This module verifies a retained
+room snapshot via ``/export``, then catches up from the snapshot's highest seq
+using bounded incremental reads.
+
+If Kibble advances so quickly that the first catch-up page already has a gap,
+the checker may retry from a fresh export snapshot. A retry never weakens the
+positive condition: OPEN_CONFIRMED still requires an exact retained JOB and a
+complete gap-free catch-up from one fresh snapshot. Persistent ambiguity fails
+closed.
 
 It is strictly read-only: no claim, send, tool execution, wallet action, or
 FLOP/token spend occurs here.
@@ -34,6 +40,14 @@ LIVE_RANK = {
     "CLAIMED": 1,
     "DELIVERED": 2,
     "ATTESTED": 3,
+}
+
+
+RETRYABLE_SNAPSHOT_STATES = {
+    "INCONCLUSIVE_GAP",
+    "INCONCLUSIVE_TRUNCATED",
+    "INCONCLUSIVE",
+    "INCONCLUSIVE_EMPTY_EXPORT",
 }
 
 
@@ -108,9 +122,17 @@ def _scan_job(
 
         if parsed["verb"] == "JOB":
             if message_seq != job_seq:
-                return {"state": "JOB_MISMATCH", "lifecycle": lifecycle, "highest_seq": highest_seq}
+                return {
+                    "state": "JOB_MISMATCH",
+                    "lifecycle": lifecycle,
+                    "highest_seq": highest_seq,
+                }
             if sender_of(message) != issuer_did or content_hash(parsed) != expected_hash:
-                return {"state": "JOB_MISMATCH", "lifecycle": lifecycle, "highest_seq": highest_seq}
+                return {
+                    "state": "JOB_MISMATCH",
+                    "lifecycle": lifecycle,
+                    "highest_seq": highest_seq,
+                }
             saw_exact = True
             continue
 
@@ -121,32 +143,32 @@ def _scan_job(
             lifecycle = state
 
     if require_exact_job and not saw_exact:
-        return {"state": "JOB_NOT_RETAINED", "lifecycle": lifecycle, "highest_seq": highest_seq}
+        return {
+            "state": "JOB_NOT_RETAINED",
+            "lifecycle": lifecycle,
+            "highest_seq": highest_seq,
+        }
     if lifecycle != "OPEN":
-        return {"state": "NOT_OPEN", "lifecycle": lifecycle, "highest_seq": highest_seq}
+        return {
+            "state": "NOT_OPEN",
+            "lifecycle": lifecycle,
+            "highest_seq": highest_seq,
+        }
     return {"state": "OPEN", "lifecycle": "OPEN", "highest_seq": highest_seq}
 
 
-def live_revalidate_job_export_aware(
+def _check_one_snapshot(
     cfg: dict[str, Any],
     candidate: dict[str, Any],
     *,
-    fetcher: Callable[[dict[str, Any], str, dict[str, Any]], Any] | None = None,
-    export_fetcher: Callable[[dict[str, Any], str], list[dict[str, Any]]] | None = None,
+    read: Callable[[dict[str, Any], str, dict[str, Any]], Any],
+    export_read: Callable[[dict[str, Any], str], list[dict[str, Any]]],
+    page_limit: int,
+    max_pages: int,
+    snapshot_attempt: int,
 ) -> dict[str, Any]:
-    """Verify exact retained JOB, then catch up to the live room head.
-
-    A positive result requires the exact persisted JOB to still exist in the
-    retained export and no later lifecycle event for that job through a bounded
-    catch-up read. Any gap, truncation, mismatch, or unavailable evidence fails
-    closed.
-    """
+    """Check one export snapshot plus its catch-up window."""
     room = str(candidate["room"])
-    page_limit = max(20, min(200, int(cfg.get("job_gate_live_page_limit", 200))))
-    max_pages = max(1, min(20, int(cfg.get("job_gate_live_max_pages", 6))))
-    read = fetcher or technocore_json
-    export_read = export_fetcher or retained_export_messages
-
     snapshot = export_read(cfg, room)
     snapshot_check = _scan_job(candidate, snapshot, require_exact_job=True)
     messages_seen = len(snapshot)
@@ -157,6 +179,7 @@ def live_revalidate_job_export_aware(
             "pages": 0,
             "messages": messages_seen,
             "source": "export",
+            "snapshot_attempts": snapshot_attempt,
         }
 
     cursor = int(snapshot_check["highest_seq"])
@@ -167,6 +190,7 @@ def live_revalidate_job_export_aware(
             "pages": 0,
             "messages": messages_seen,
             "source": "export",
+            "snapshot_attempts": snapshot_attempt,
         }
 
     pages = 0
@@ -187,6 +211,7 @@ def live_revalidate_job_export_aware(
                 "pages": pages,
                 "messages": messages_seen,
                 "source": "export+catchup",
+                "snapshot_attempts": snapshot_attempt,
             }
 
         first_seq = seq_of(messages[0])
@@ -197,6 +222,9 @@ def live_revalidate_job_export_aware(
                 "pages": pages,
                 "messages": messages_seen,
                 "source": "export+catchup",
+                "snapshot_attempts": snapshot_attempt,
+                "gap_from": cursor + 1,
+                "gap_to": first_seq - 1,
             }
 
         catchup_check = _scan_job(candidate, messages, require_exact_job=False)
@@ -207,6 +235,7 @@ def live_revalidate_job_export_aware(
                 "pages": pages,
                 "messages": messages_seen,
                 "source": "export+catchup",
+                "snapshot_attempts": snapshot_attempt,
             }
 
         new_cursor = max(cursor, int(catchup_check["highest_seq"]))
@@ -217,6 +246,7 @@ def live_revalidate_job_export_aware(
                 "pages": pages,
                 "messages": messages_seen,
                 "source": "export+catchup",
+                "snapshot_attempts": snapshot_attempt,
             }
         cursor = new_cursor
 
@@ -227,6 +257,7 @@ def live_revalidate_job_export_aware(
                 "pages": pages,
                 "messages": messages_seen,
                 "source": "export+catchup",
+                "snapshot_attempts": snapshot_attempt,
             }
 
     return {
@@ -235,4 +266,47 @@ def live_revalidate_job_export_aware(
         "pages": pages,
         "messages": messages_seen,
         "source": "export+catchup",
+        "snapshot_attempts": snapshot_attempt,
     }
+
+
+def live_revalidate_job_export_aware(
+    cfg: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    fetcher: Callable[[dict[str, Any], str, dict[str, Any]], Any] | None = None,
+    export_fetcher: Callable[[dict[str, Any], str], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Verify exact retained JOB, then catch up to the live room head.
+
+    A positive result requires one fresh snapshot to contain the exact persisted
+    JOB and a complete gap-free catch-up with no later lifecycle event. When a
+    busy-room race causes an incomplete catch-up, retry from a new snapshot a
+    small bounded number of times. Any persistent ambiguity still fails closed.
+    """
+    page_limit = max(20, min(200, int(cfg.get("job_gate_live_page_limit", 200))))
+    max_pages = max(1, min(20, int(cfg.get("job_gate_live_max_pages", 6))))
+    snapshot_retries = max(
+        0,
+        min(4, int(cfg.get("job_gate_live_snapshot_retries", 2))),
+    )
+    read = fetcher or technocore_json
+    export_read = export_fetcher or retained_export_messages
+
+    last: dict[str, Any] | None = None
+    for attempt in range(1, snapshot_retries + 2):
+        result = _check_one_snapshot(
+            cfg,
+            candidate,
+            read=read,
+            export_read=export_read,
+            page_limit=page_limit,
+            max_pages=max_pages,
+            snapshot_attempt=attempt,
+        )
+        if result["state"] not in RETRYABLE_SNAPSHOT_STATES:
+            return result
+        last = result
+
+    assert last is not None
+    return last
