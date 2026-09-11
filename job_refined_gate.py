@@ -19,11 +19,11 @@ from typing import Any, Callable
 
 from issuer_reputation import issuer_reputation
 from job_candidate_refiner import ensure_refiner_schema
+from job_live_revalidator import live_revalidate_job_export_aware
 from job_progress_gate import (
     _issuer_meets_gate,
     _thresholds,
     gate_metrics,
-    live_revalidate_job,
 )
 from job_shadow import ensure_job_shadow_schema
 from technoscout.db import connect
@@ -65,8 +65,17 @@ def refined_candidate_rows(
     ensure_refiner_schema(con)
     base_thresholds = _thresholds(cfg)
     refined = _refined_thresholds(cfg)
-    age = max(60, int(max_age_seconds if max_age_seconds is not None else refined["max_age_seconds"]))
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat(timespec="seconds")
+    age = max(
+        60,
+        int(
+            max_age_seconds
+            if max_age_seconds is not None
+            else refined["max_age_seconds"]
+        ),
+    )
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=age)
+    ).isoformat(timespec="seconds")
 
     rows = con.execute(
         """
@@ -131,7 +140,9 @@ def evaluate_refined_gate(
             "COLLECTING",
             False,
             "insufficient baseline evidence: "
-            + ", ".join(f"{key}={metrics[key]}/{base_thresholds[key]}" for key in missing),
+            + ", ".join(
+                f"{key}={metrics[key]}/{base_thresholds[key]}" for key in missing
+            ),
             metrics,
         )
 
@@ -188,7 +199,7 @@ def evaluate_refined_gate(
             check = (
                 revalidator(cfg, source)
                 if revalidator is not None
-                else live_revalidate_job(cfg, source)
+                else live_revalidate_job_export_aware(cfg, source)
             )
         except Exception as exc:
             check = {
@@ -210,7 +221,10 @@ def evaluate_refined_gate(
                 tuple(checked),
             )
         state = str(check.get("state", ""))
-        if state.startswith("INCONCLUSIVE") or state == "JOB_NOT_FOUND":
+        if (
+            state.startswith("INCONCLUSIVE")
+            or state in {"JOB_NOT_FOUND", "JOB_NOT_RETAINED"}
+        ):
             inconclusive = True
 
     return RefinedJobGateResult(
@@ -232,7 +246,10 @@ def print_result(result: RefinedJobGateResult) -> None:
         f"ready={'yes' if result.ready_for_manual_claim_trial else 'no'}"
     )
     print(f"reason={result.reason}")
-    print("metrics=" + " ".join(f"{k}:{v}" for k, v in sorted(result.metrics.items())))
+    print(
+        "metrics="
+        + " ".join(f"{key}:{value}" for key, value in sorted(result.metrics.items()))
+    )
     for item in result.candidates:
         rep = item.get("issuer_reputation", {})
         print(
@@ -246,7 +263,8 @@ def print_result(result: RefinedJobGateResult) -> None:
         if live:
             print(
                 f"    live={live.get('state')} lifecycle={live.get('lifecycle')} "
-                f"pages={live.get('pages',0)} messages={live.get('messages',0)}"
+                f"pages={live.get('pages',0)} messages={live.get('messages',0)} "
+                f"source={live.get('source','-')}"
             )
     print(
         "NOTE: READY_FOR_MANUAL_CLAIM_TRIAL still does not claim anything. "
