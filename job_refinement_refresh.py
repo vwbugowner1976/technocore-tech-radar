@@ -78,7 +78,7 @@ def refresh_candidate(
     model: str,
     *,
     revalidator: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None,
-    evaluator: Callable[..., dict[str, Any]] | None = None,
+    refiner: Callable[[dict[str, Any], dict[str, Any], Any, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Live-check first, then refresh semantic metadata only when still OPEN."""
     check = (
@@ -93,7 +93,8 @@ def refresh_candidate(
             "reason": f"live OPEN revalidation failed: {check.get('state','UNKNOWN')}",
         }
 
-    result = refine_candidate(cfg, candidate, llm, model, evaluator=evaluator)
+    run_refiner = refiner or refine_candidate
+    result = run_refiner(cfg, candidate, llm, model)
     store_refinement(con, candidate, result)
     return {
         "state": "REFRESHED",
