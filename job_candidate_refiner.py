@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -19,7 +21,16 @@ from issuer_reputation import issuer_reputation
 from job_progress_gate import _issuer_meets_gate, _thresholds
 from job_shadow import content_hash, ensure_job_shadow_schema, parse_kibble_message, sender_of
 from job_shadow_policy import SELF_CONTAINED_TYPES
-from technoscout.common import clamp_score, local_llm_json, room_messages, seq_of, technocore_json, utc_now
+from technoscout.common import (
+    RateLimited,
+    clamp_score,
+    local_llm_json,
+    room_messages,
+    safe_room,
+    seq_of,
+    technocore_json,
+    utc_now,
+)
 from technoscout.db import connect
 from technoscout.llm_backend import create_llm_backend
 from technoscout_cli import database_path, load_config
@@ -133,26 +144,100 @@ def recent_near_miss_rows(con: Any, cfg: dict[str, Any], *, limit: int = 5, max_
     return result
 
 
-def fetch_exact_job(cfg: dict[str, Any], candidate: dict[str, Any], *, fetcher: Callable[[dict[str, Any], str, dict[str, Any]], Any] | None = None) -> dict[str, Any]:
-    """Fetch and verify the exact original JOB record. Fail closed on mismatch."""
-    read = fetcher or technocore_json
+def _verify_message(candidate: dict[str, Any], message: dict[str, Any]) -> dict[str, Any] | None:
+    """Return EXACT/MISMATCH for the candidate seq, or None for another seq."""
+    seq = int(candidate["job_seq"])
+    if seq_of(message) != seq:
+        return None
+    parsed = parse_kibble_message(message.get("text", message.get("message", "")))
+    if not parsed or parsed.get("verb") != "JOB":
+        return {"state": "MISMATCH"}
+    if parsed.get("job_id") != candidate["job_id"]:
+        return {"state": "MISMATCH"}
+    if sender_of(message) != candidate["issuer_did"]:
+        return {"state": "MISMATCH"}
+    if content_hash(parsed) != candidate["content_hash"]:
+        return {"state": "MISMATCH"}
+    return {"state": "EXACT", "job": parsed}
+
+
+def _retained_export_messages(cfg: dict[str, Any], room: str) -> list[dict[str, Any]]:
+    """GET the retained room ring as raw JSONL and parse it only in memory.
+
+    A normal ``?since=`` room read is a tail view. In a very busy room, more than
+    the requested limit may have arrived after a candidate seq, so the exact old
+    record can legitimately be absent from that response even though it is still
+    retained. ``/export`` is the byte-exact retained ring and is therefore the
+    correct fallback for exact-record verification.
+    """
+    safe = safe_room(room)
+    if not safe or safe != room:
+        raise ValueError("invalid room")
+    base_url = str(cfg.get("base_url", "https://technocore.chat")).rstrip("/")
+    url = f"{base_url}/r/{safe}/export"
+    max_bytes = max(1_048_576, min(12 * 1024 * 1024, int(cfg.get("job_refiner_export_max_bytes", 11 * 1024 * 1024))))
+    timeout = float(cfg.get("http_timeout_seconds", 25))
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "technoscout/0.8", "Accept": "application/x-ndjson, application/json, text/plain"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(max_bytes + 1)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(16384).decode("utf-8", "replace")
+        if exc.code == 429:
+            raise RateLimited(30.0) from exc
+        raise RuntimeError(f"Technocore export HTTP {exc.code}: {detail[:300]}") from exc
+    if len(body) > max_bytes:
+        raise ValueError("Technocore room export exceeded configured refiner limit")
+
+    result: list[dict[str, Any]] = []
+    for raw_line in body.splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            item = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(item, dict):
+            result.append(item)
+    return result
+
+
+def fetch_exact_job(cfg: dict[str, Any], candidate: dict[str, Any], *, fetcher: Callable[[dict[str, Any], str, dict[str, Any]], Any] | None = None, export_fetcher: Callable[[dict[str, Any], str], list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+    """Fetch and verify the exact original JOB record. Fail closed on mismatch.
+
+    Injected ``fetcher`` keeps unit tests/network adapters simple. In production,
+    try the cheap incremental JSON tail first and, if the exact seq has fallen out
+    of that tail because Kibble is busy, fall back to the retained raw room export.
+    Raw JOB text is used transiently for verification/refinement and is not stored.
+    """
     room = str(candidate["room"])
     seq = int(candidate["job_seq"])
-    payload = read(cfg, f"/r/{room}", {"format": "json", "since": max(0, seq - 1), "limit": 50})
+    read = fetcher or technocore_json
+    payload = read(
+        cfg,
+        f"/r/{room}",
+        {"format": "json", "since": max(0, seq - 1), "limit": 200},
+    )
     for message in sorted(room_messages(payload), key=seq_of):
-        if seq_of(message) != seq:
-            continue
-        parsed = parse_kibble_message(message.get("text", message.get("message", "")))
-        if not parsed or parsed.get("verb") != "JOB":
-            return {"state": "MISMATCH"}
-        if parsed.get("job_id") != candidate["job_id"]:
-            return {"state": "MISMATCH"}
-        if sender_of(message) != candidate["issuer_did"]:
-            return {"state": "MISMATCH"}
-        if content_hash(parsed) != candidate["content_hash"]:
-            return {"state": "MISMATCH"}
-        return {"state": "EXACT", "job": parsed}
-    return {"state": "NOT_FOUND"}
+        checked = _verify_message(candidate, message)
+        if checked is not None:
+            return checked
+
+    # For an injected fetcher, NOT_FOUND is intentional and deterministic unless
+    # a dedicated export_fetcher was also supplied.
+    if fetcher is not None and export_fetcher is None:
+        return {"state": "NOT_FOUND"}
+
+    export_read = export_fetcher or _retained_export_messages
+    for message in export_read(cfg, room):
+        checked = _verify_message(candidate, message)
+        if checked is not None:
+            return checked
+    return {"state": "NOT_RETAINED"}
 
 
 def store_refinement(con: Any, candidate: dict[str, Any], result: dict[str, Any]) -> None:
@@ -181,8 +266,8 @@ def store_refinement(con: Any, candidate: dict[str, Any], result: dict[str, Any]
     con.commit()
 
 
-def refine_candidate(cfg: dict[str, Any], candidate: dict[str, Any], llm: Any, model: str, *, fetcher=None, evaluator=None) -> dict[str, Any]:
-    exact = fetch_exact_job(cfg, candidate, fetcher=fetcher)
+def refine_candidate(cfg: dict[str, Any], candidate: dict[str, Any], llm: Any, model: str, *, fetcher=None, export_fetcher=None, evaluator=None) -> dict[str, Any]:
+    exact = fetch_exact_job(cfg, candidate, fetcher=fetcher, export_fetcher=export_fetcher)
     if exact["state"] != "EXACT":
         return {"decision": "INCONCLUSIVE", "relevance": 0, "technical_fit": 0, "confidence": 100, "effort": "unknown", "reason": f"exact job fetch failed: {exact['state']}"}
     call = evaluator or local_llm_json
@@ -203,6 +288,7 @@ def refine_candidate(cfg: dict[str, Any], candidate: dict[str, Any], llm: Any, m
 def _runtime_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg = dict(cfg)
     defaults = {
+        "base_url": "https://technocore.chat",
         "llm_backend": "managed_mlx",
         "llm_timeout_seconds": 90,
         "max_response_bytes": 5_000_000,
@@ -215,6 +301,7 @@ def _runtime_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
         "mlx_worker_first_request_extra_seconds": 60,
         "mlx_worker_kill_grace_seconds": 2,
         "http_timeout_seconds": 25,
+        "job_refiner_export_max_bytes": 11 * 1024 * 1024,
     }
     for key, value in defaults.items():
         cfg.setdefault(key, value)
