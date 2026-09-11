@@ -29,6 +29,7 @@ from job_refined_gate import evaluate_refined_gate
 from technoscout.db import connect
 from technoscout.llm_backend import create_llm_backend
 from technoscout_cli import database_path, load_config
+from technoscout_notify import notify_ready_candidate
 
 
 TERMINAL_LIVE_FAILURES = {"NOT_OPEN", "JOB_NOT_RETAINED", "JOB_MISMATCH"}
@@ -227,6 +228,12 @@ def main() -> None:
             max_age_seconds=max(60, int(args.max_age_seconds)),
         )
         print_summary(summary)
+        if summary["ready"] and summary["ready_job_id"]:
+            notice = notify_ready_candidate(cfg, str(summary["ready_job_id"]))
+            print(
+                f"READY notify | state={notice['state']} "
+                f"candidate={summary['ready_job_id']} detail={notice['detail']}"
+            )
     finally:
         con.close()
 
