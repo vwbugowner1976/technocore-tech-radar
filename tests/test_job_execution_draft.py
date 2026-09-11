@@ -82,6 +82,10 @@ class JobExecutionDraftTests(unittest.TestCase):
             }
 
         def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
+            self.assertIn("Do NOT block merely because the job is already claimed", prompt)
+            self.assertTrue(payload["claim"]["claim_verified"])
+            self.assertEqual(payload["claim"]["claim_owner"], "this_agent")
+            self.assertEqual(payload["claim"]["claim_sender_did"], "did:key:z6MkWorker")
             return {
                 "decision": "DRAFT",
                 "confidence": 94,
