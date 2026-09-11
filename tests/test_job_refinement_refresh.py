@@ -86,7 +86,7 @@ class JobRefinementRefreshTests(unittest.TestCase):
             None,
             "model",
             revalidator=revalidator,
-            evaluator=lambda *a, **k: {},
+            refiner=lambda *a, **k: {},
         )
         self.assertEqual(result["state"], "NOT_REFRESHED")
         count = self.con.execute("SELECT COUNT(*) FROM job_candidate_refinements").fetchone()[0]
@@ -98,7 +98,7 @@ class JobRefinementRefreshTests(unittest.TestCase):
         def revalidator(cfg, item):
             return {"state": "OPEN_CONFIRMED", "lifecycle": "OPEN", "pages": 1, "messages": 10}
 
-        def evaluator(*args, **kwargs):
+        def refiner(*args, **kwargs):
             return {
                 "decision": "SAFE_FIT",
                 "relevance": 84,
@@ -115,7 +115,7 @@ class JobRefinementRefreshTests(unittest.TestCase):
             None,
             "model",
             revalidator=revalidator,
-            evaluator=evaluator,
+            refiner=refiner,
         )
         self.assertEqual(result["state"], "REFRESHED")
         row = self.con.execute(
