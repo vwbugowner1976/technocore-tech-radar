@@ -45,7 +45,7 @@ class JobCandidateRefinerTests(unittest.TestCase):
             self.con,
             seen_at=now,
             room="kibble",
-            job_id="kabcdef012",
+            job_id="kabcdef0123",
             job_seq=100,
             issuer_did=issuer,
             signed_identity=True,
@@ -70,7 +70,7 @@ class JobCandidateRefinerTests(unittest.TestCase):
 
     def test_recent_near_miss_requires_good_issuer(self):
         rows = recent_near_miss_rows(self.con, {}, limit=5, max_age_seconds=3600)
-        self.assertEqual([r["job_id"] for r in rows], ["kabcdef012"])
+        self.assertEqual([r["job_id"] for r in rows], ["kabcdef0123"])
 
     def test_fetch_exact_job_fails_closed_on_hash_mismatch(self):
         candidate = dict(recent_near_miss_rows(self.con, {}, limit=1, max_age_seconds=3600)[0])
@@ -80,26 +80,48 @@ class JobCandidateRefinerTests(unittest.TestCase):
             return {"messages": [{
                 "seq": 100,
                 "from": candidate["issuer_did"],
-                "text": "JOB v1 | kabcdef012 | explain | Title | Body",
+                "text": "JOB v1 | kabcdef0123 | explain | Title | Body",
             }]}
 
         result = fetch_exact_job({}, candidate, fetcher=fetcher)
         self.assertEqual(result["state"], "MISMATCH")
 
+    def test_fetch_exact_job_falls_back_to_retained_export(self):
+        candidate = dict(recent_near_miss_rows(self.con, {}, limit=1, max_age_seconds=3600)[0])
+        from job_shadow import content_hash, parse_kibble_message
+        parsed = parse_kibble_message("JOB v1 | kabcdef0123 | explain | Title | Body")
+        self.assertIsNotNone(parsed)
+        candidate["content_hash"] = content_hash(parsed)
+
+        def fetcher(cfg, path, query):
+            # Simulate a very busy room: the normal tail no longer includes seq 100.
+            return {"messages": [{"seq": 1000, "from": "did:key:z6Mkother", "text": "noise"}]}
+
+        def export_fetcher(cfg, room):
+            return [{
+                "seq": 100,
+                "from": candidate["issuer_did"],
+                "text": "JOB v1 | kabcdef0123 | explain | Title | Body",
+            }]
+
+        result = fetch_exact_job({}, candidate, fetcher=fetcher, export_fetcher=export_fetcher)
+        self.assertEqual(result["state"], "EXACT")
+        self.assertEqual(result["job"]["job_id"], "kabcdef0123")
+
     def test_refine_candidate_normalizes_semantic_result(self):
         candidate = dict(recent_near_miss_rows(self.con, {}, limit=1, max_age_seconds=3600)[0])
-        candidate["content_hash"] = "fixed"
 
         def fake_fetch(cfg, path, query):
             return {"messages": [{
                 "seq": 100,
                 "from": candidate["issuer_did"],
-                "text": "JOB v1 | kabcdef012 | explain | Title | Body",
+                "text": "JOB v1 | kabcdef0123 | explain | Title | Body",
             }]}
 
         # Make expected hash exactly match the fetched record.
         from job_shadow import content_hash, parse_kibble_message
-        parsed = parse_kibble_message("JOB v1 | kabcdef012 | explain | Title | Body")
+        parsed = parse_kibble_message("JOB v1 | kabcdef0123 | explain | Title | Body")
+        self.assertIsNotNone(parsed)
         candidate["content_hash"] = content_hash(parsed)
 
         def evaluator(*args, **kwargs):
