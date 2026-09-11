@@ -86,6 +86,40 @@ class JobLiveRevalidatorTests(unittest.TestCase):
             export_fetcher=self.export_with_job,
         )
         self.assertEqual(result["state"], "INCONCLUSIVE_GAP")
+        self.assertEqual(result["snapshot_attempts"], 3)
+
+    def test_transient_gap_retries_from_fresh_snapshot(self):
+        calls = {"fetch": 0, "export": 0}
+
+        def export_fetcher(cfg, room):
+            calls["export"] += 1
+            if calls["export"] == 1:
+                return self.export_with_job(cfg, room)
+            return [
+                {"seq": 100, "from": self.issuer, "text": self.text},
+                {"seq": 104, "from": "did:key:z6MkOther", "text": "noise"},
+                {"seq": 105, "from": "did:key:z6MkOther", "text": "noise"},
+            ]
+
+        def fetcher(cfg, path, query):
+            calls["fetch"] += 1
+            if calls["fetch"] == 1:
+                return {
+                    "messages": [
+                        {"seq": 105, "from": "did:key:z6MkOther", "text": "noise"}
+                    ]
+                }
+            return {"messages": []}
+
+        result = live_revalidate_job_export_aware(
+            {},
+            self.candidate,
+            fetcher=fetcher,
+            export_fetcher=export_fetcher,
+        )
+        self.assertEqual(result["state"], "OPEN_CONFIRMED")
+        self.assertEqual(result["snapshot_attempts"], 2)
+        self.assertEqual(calls["export"], 2)
 
 
 if __name__ == "__main__":
