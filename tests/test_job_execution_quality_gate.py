@@ -69,6 +69,16 @@ class JobExecutionQualityGateTests(unittest.TestCase):
             },
         }
 
+    @staticmethod
+    def duplicate_key_job():
+        return {
+            "verb": "JOB",
+            "job_id": "kabcdef0123",
+            "job_type": "explain",
+            "title": "Backpressure signaling across a JSON object with duplicate keys boundaries",
+            "body": "Explain how a JSON object with duplicate keys communicates congestion upstream when worker queues fill up faster than processing capacity. Parsers disagree on which one wins, and both are defensible. Success: identifies the flow control mechanism and how upstream producers must throttle.",
+        }
+
     def tearDown(self):
         self.con.close()
 
@@ -84,6 +94,21 @@ class JobExecutionQualityGateTests(unittest.TestCase):
         flags = deterministic_quality_flags(
             self.exact_ok(None, None)["job"],
             "Establish the safe aggregate concurrent buffered bytes threshold with a staged load test while watching memory, spill, latency, and errors.",
+        )
+        self.assertEqual(flags, [])
+
+    def test_guard_rejects_duplicate_keys_as_backpressure_signal(self):
+        flags = deterministic_quality_flags(
+            self.duplicate_key_job(),
+            "JSON parsers often keep the last duplicate key. This can be used to signal backpressure by setting a key to indicate congestion, and upstream producers should throttle when they see it.",
+        )
+        self.assertTrue(any("parser semantics" in flag for flag in flags))
+        self.assertTrue(any("runtime mechanism" in flag for flag in flags))
+
+    def test_guard_accepts_explicit_flow_control_separate_from_duplicate_keys(self):
+        flags = deterministic_quality_flags(
+            self.duplicate_key_job(),
+            "Duplicate keys do not provide backpressure; their winner policy is only parser semantics. Use a bounded queue that blocks producers or an explicit credit mechanism. When the queue is full or credits reach zero, producers must wait or throttle until consumers free capacity.",
         )
         self.assertEqual(flags, [])
 
