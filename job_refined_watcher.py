@@ -10,6 +10,10 @@ sent to the local semantic refiner.
 This module never CLAIMs, sends, executes job content, opens job URLs, spends FLOP,
 touches wallets/credentials, or changes TechnoScout autonomy. A SAFE_FIT result can
 only produce read-only READY evidence through the existing Refined Job Gate.
+
+The CLI entrypoint then hands that READY evidence to job_auto_orchestrator, which may
+prepare a local CLAIM preview and may process already-SENT claims locally. Neither
+module approves or sends CLAIM/DELIVER writes.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from __future__ import annotations
 import argparse
 from typing import Any, Callable
 
+from job_auto_orchestrator import run_once as run_auto_once
 from job_candidate_refiner import (
     _runtime_defaults,
     ensure_refiner_schema,
@@ -29,7 +34,6 @@ from job_refined_gate import evaluate_refined_gate
 from technoscout.db import connect
 from technoscout.llm_backend import create_llm_backend
 from technoscout_cli import database_path, load_config
-from technoscout_notify import notify_ready_candidate
 
 
 TERMINAL_LIVE_FAILURES = {"NOT_OPEN", "JOB_NOT_RETAINED", "JOB_MISMATCH"}
@@ -228,12 +232,31 @@ def main() -> None:
             max_age_seconds=max(60, int(args.max_age_seconds)),
         )
         print_summary(summary)
-        if summary["ready"] and summary["ready_job_id"]:
-            notice = notify_ready_candidate(cfg, str(summary["ready_job_id"]))
+
+        auto = run_auto_once(
+            con,
+            cfg,
+            ready_job_id=str(summary["ready_job_id"] if summary["ready"] else ""),
+            room=str(cfg.get("job_shadow_room", "kibble")),
+            limit=2,
+        )
+        prepared = auto.get("prepared")
+        if prepared:
             print(
-                f"READY notify | state={notice['state']} "
-                f"candidate={summary['ready_job_id']} detail={notice['detail']}"
+                f"Auto Orchestrator | prepare={prepared.get('state','UNKNOWN')} "
+                f"job={prepared.get('job_id','')}"
             )
+        for item in auto.get("processed", []):
+            print(f"Auto Orchestrator | job={item['job_id']} state={item['state']}")
+        notices = auto["notifications"]
+        if any(int(v) for v in notices.values()):
+            print(
+                "Auto Orchestrator | notifications "
+                f"claim_ready={notices['claim_ready']} "
+                f"delivery_ready={notices['delivery_ready']} "
+                f"blocked={notices['blocked']} failed={notices['failed']}"
+            )
+        print("Auto Orchestrator | STOP: no CLAIM or DELIVER was approved or sent.")
     finally:
         con.close()
 
