@@ -3,8 +3,8 @@
 
 This gate exists because a cooperative reviewer can agree with a plausible but
 incomplete answer. It adds deterministic semantic checks, an adversarial local
-LLM pass, at most one deterministic-feedback repair pass, and a narrow final
-adjudication when both reviewers return the same otherwise-unflagged answer.
+LLM pass, at most one deterministic-feedback repair pass, and a narrow binary
+final adjudication when both reviewers return the same otherwise-unflagged answer.
 It never posts RESULT/DELIVER, signs, browses, executes commands, spends
 FLOP/tokens, or touches wallets.
 """
@@ -151,21 +151,20 @@ returned the candidate answer unchanged, and a separate repair reviewer also
 returned that same answer unchanged, while the deterministic checker reports no
 remaining known semantic flags.
 
-Independently compare the candidate answer against the exact JOB and every
-explicit Success requirement. Do not defer to either prior reviewer. Choose:
-- PASS only if no material correction is actually needed.
-- REVISED only if you provide a materially changed answer that fixes a concrete
-  omission or error you can name.
-- BLOCKED if the answer is materially wrong/incomplete but you cannot safely
-  repair it from the supplied self-contained information.
+You are a verdict-only judge. Do NOT rewrite the answer and do NOT propose a new
+answer. Independently compare the candidate answer against the exact JOB and every
+explicit Success requirement. Do not defer to either prior reviewer. Choose only:
+- PASS if the candidate answer is already materially correct and complete enough
+  to proceed to the separate Generic Success Gate.
+- BLOCKED if a material correction is still required.
 
-Preserve concrete JOB observations that matter to the requested conclusion.
-Do not invent facts. A cosmetic paraphrase is not a revision.
+Preserve the distinction between cosmetic wording preferences and material
+correctness. Do not invent facts. If uncertain whether a material correction is
+required, choose BLOCKED.
 
 Return JSON only:
-{"decision":"PASS|REVISED|BLOCKED","confidence":0-100,
- "critique":"why the unchanged answer is sufficient, or the exact defect fixed",
- "answer":"final concise answer suitable for the requester"}
+{"decision":"PASS|BLOCKED","confidence":0-100,
+ "critique":"why the candidate is sufficient or the exact material defect"}
 """.strip()
 
 
@@ -191,6 +190,20 @@ def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
         decision = "BLOCKED"
         critique = critique or "quality reviewer returned no final answer"
     return {"decision": decision, "confidence": confidence, "critique": critique, "answer": answer}
+
+
+def _normalize_adjudication(raw: dict[str, Any]) -> dict[str, Any]:
+    decision = str(raw.get("decision", "BLOCKED")).strip().upper()
+    if decision not in {"PASS", "BLOCKED"}:
+        decision = "BLOCKED"
+    try:
+        confidence = max(0, min(100, int(raw.get("confidence", 0))))
+    except (TypeError, ValueError):
+        confidence = 0
+    critique = _clean(raw.get("critique", ""), 1200)
+    if decision == "BLOCKED" and not critique:
+        critique = "final quality adjudicator did not return an explicit PASS"
+    return {"decision": decision, "confidence": confidence, "critique": critique}
 
 
 def deterministic_quality_flags(job: dict[str, Any], answer: str) -> list[str]:
@@ -520,8 +533,8 @@ def quality_review(
                 max_tokens=max_tokens,
                 timeout_seconds=timeout_seconds,
             )
-            adjudicated = _normalize(adjudication_raw)
-            if adjudicated["decision"] == "BLOCKED":
+            adjudicated = _normalize_adjudication(adjudication_raw)
+            if adjudicated["decision"] != "PASS":
                 return {
                     "state": "BLOCKED",
                     "reason": adjudicated["critique"] or "final quality adjudicator blocked the answer",
@@ -529,17 +542,14 @@ def quality_review(
                     "repair_attempted": True,
                     "adjudication_attempted": True,
                 }
-            if adjudicated["decision"] == "REVISED" and adjudicated["answer"] == candidate_before_repair:
-                return {
-                    "state": "BLOCKED",
-                    "reason": "final quality adjudicator marked REVISED but again returned the candidate answer unchanged",
-                    "flags": repair_failures,
-                    "repair_attempted": True,
-                    "adjudication_attempted": True,
-                }
-            if adjudicated["decision"] == "PASS":
-                adjudicated["answer"] = candidate_before_repair
-            adjudicated_flags = deterministic_quality_flags(exact["job"], adjudicated["answer"])
+
+            result = {
+                "decision": "PASS",
+                "confidence": int(adjudicated["confidence"]),
+                "critique": adjudicated["critique"],
+                "answer": candidate_before_repair,
+            }
+            adjudicated_flags = deterministic_quality_flags(exact["job"], result["answer"])
             if adjudicated_flags:
                 return {
                     "state": "BLOCKED",
@@ -548,7 +558,6 @@ def quality_review(
                     "repair_attempted": True,
                     "adjudication_attempted": True,
                 }
-            result = adjudicated
             flags_after = []
         else:
             result = repaired
