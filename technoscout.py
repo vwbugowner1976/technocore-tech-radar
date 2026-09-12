@@ -1062,6 +1062,7 @@ class TechnoScout:
                     flush=True,
                 )
             except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
+                self.db.rollback()
                 print(
                     f"[{label} {index}/{total}] TIMEOUT/NETWORK "
                     f"{elapsed(started)} room={room}: "
@@ -1071,6 +1072,7 @@ class TechnoScout:
                 )
                 continue
             except Exception as exc:
+                self.db.rollback()
                 print(
                     f"[{label} {index}/{total}] ERROR {elapsed(started)} "
                     f"room={room}: {type(exc).__name__}: {exc} -- unchanged",
@@ -1417,6 +1419,7 @@ class TechnoScout:
                 self.db.commit()
                 print(f"[watch {index}/{total}] OK {elapsed(started)} room={room}", flush=True)
             except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
+                self.db.rollback()
                 print(
                     f"[watch {index}/{total}] TIMEOUT/NETWORK {elapsed(started)} room={room}: "
                     f"{type(exc).__name__}: {exc} -- skipped",
@@ -1425,6 +1428,7 @@ class TechnoScout:
                 )
                 continue
             except Exception as exc:
+                self.db.rollback()
                 print(
                     f"[watch {index}/{total}] ERROR {elapsed(started)} room={room}: "
                     f"{type(exc).__name__}: {exc} -- skipped",
@@ -1517,6 +1521,7 @@ class TechnoScout:
                     flush=True,
                 )
         except Exception as exc:
+            self.db.rollback()
             print(
                 f"[reaction-auto] ERROR {type(exc).__name__}: {exc}",
                 file=sys.stderr,
@@ -2312,14 +2317,17 @@ def main() -> None:
             try:
                 scout.cycle()
             except RateLimited as exc:
+                scout.db.rollback()
                 print(f"[rate-limit] sleep {exc.wait_seconds:.1f}s", flush=True)
                 time.sleep(exc.wait_seconds)
                 continue
             except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+                scout.db.rollback()
                 print(f"[network] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                 time.sleep(10)
                 continue
             except Exception as exc:
+                scout.db.rollback()
                 print(f"[cycle-error] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                 time.sleep(10)
                 continue
