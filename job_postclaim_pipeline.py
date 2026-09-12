@@ -2,15 +2,16 @@
 """Fast local-only post-CLAIM pipeline for one Kibble job.
 
 Run immediately after job_claim_trial.py reports SENT. This command intentionally
-performs no signed write. It reuses one exact JOB snapshot, one retained CLAIM
+performs no signed write. It reuses one exact JOB snapshot, one verified CLAIM
 proof, and one local LLM backend across:
 
     draft -> review -> adversarial quality gate -> DELIVER prepare
 
-The final delivery prepare still performs the normal live delivery-readiness check
-(no later DELIVER/RESULT/ATTEST/WITNESS or conflicting CLAIM). Only the expensive,
-read-only local stages reuse the initial exact snapshot/proof so a busy retention
-ring cannot age the JOB out between three separate model invocations.
+For the normal one-command flow, the exact JOB was persisted locally before the
+signed CLAIM. A retained remote CLAIM is preferred; if it has aged out, the
+execution stages may use the cryptographically verified local HTTP-200 CLAIM
+receipt. DELIVER itself still requires the normal fresh live lifecycle/conflict
+check and never relies on local receipt alone.
 
 This command never approves or sends DELIVER, never spends FLOP/tokens, never
 browses, never executes JOB-provided code/commands, and never touches wallets.
@@ -28,6 +29,7 @@ from job_execution_draft import claimed_trial, generate_draft, verify_claim_reta
 from job_execution_quality_gate import deterministic_quality_flags, quality_review
 from job_execution_review import review_draft
 from job_execution_semantic_repair import repair_known_semantic_trap
+from job_local_evidence import load_exact_job_snapshot
 from job_success_criterion_gate import persist_success_review, validate_success_criterion
 from technoscout.db import connect
 from technoscout.llm_backend import create_llm_backend
@@ -75,7 +77,7 @@ def run_postclaim_pipeline(
     model: str | None = None,
     claim_loader: Callable[..., tuple[dict[str, Any] | None, str]] = claimed_trial,
     claim_verifier: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = verify_claim_retained,
-    exact_fetcher: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = fetch_exact_job,
+    exact_fetcher: Callable[[dict[str, Any], dict[str,Any]], dict[str, Any]] = fetch_exact_job,
     draft_runner: Callable[..., dict[str, Any]] = generate_draft,
     review_runner: Callable[..., dict[str, Any]] = review_draft,
     quality_runner: Callable[..., dict[str, Any]] = quality_review,
@@ -99,7 +101,30 @@ def run_postclaim_pipeline(
         }
 
     candidate = _candidate_from_claim(claim)
-    exact = exact_fetcher(cfg, candidate)
+
+    # The unified human flow stores the exact already-verified JOB before CLAIM.
+    # Prefer that immutable local snapshot for post-claim local work. If this is an
+    # older/manual claim with no snapshot, preserve the previous remote exact-fetch
+    # behavior. A present-but-invalid snapshot is a hard failure, not a fallback.
+    if exact_fetcher is fetch_exact_job:
+        local_exact = load_exact_job_snapshot(con, candidate)
+        if local_exact.get("state") == "EXACT":
+            exact = local_exact
+        elif local_exact.get("state") == "SNAPSHOT_NOT_FOUND":
+            exact = exact_fetcher(cfg, candidate)
+        else:
+            return {
+                "state": "BLOCKED",
+                "stage": "exact-job",
+                "reason": (
+                    "local immutable JOB snapshot failed verification: "
+                    f"{local_exact.get('state','UNKNOWN')} "
+                    f"{local_exact.get('reason','')}"
+                ).strip(),
+            }
+    else:
+        exact = exact_fetcher(cfg, candidate)
+
     if exact.get("state") != "EXACT":
         return {
             "state": "BLOCKED",
@@ -356,6 +381,8 @@ def run_postclaim_pipeline(
         "state": "READY_FOR_HUMAN_DELIVERY",
         "job_id": job_id,
         "claim_seq": int(claim["sent_seq"]),
+        "claim_proof_source": str(claim_proof.get("source", "unknown")),
+        "exact_job_source": str(exact.get("source", "remote-retained")),
         "draft": draft,
         "review": review,
         "quality": quality,
@@ -410,6 +437,10 @@ def main() -> None:
         f"success:{times['success']:.1f}s "
         f"prepare:{times['delivery_prepare']:.1f}s "
         f"total:{result['elapsed_seconds']:.1f}s"
+    )
+    print(
+        f"evidence claim={result.get('claim_proof_source','unknown')} "
+        f"job={result.get('exact_job_source','unknown')}"
     )
     quality = result["quality"]
     print(f"quality={quality['decision']} confidence={quality['confidence']}")
