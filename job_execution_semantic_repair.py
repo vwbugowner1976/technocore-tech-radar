@@ -2,8 +2,9 @@
 """Local-only deterministic semantic repair for narrowly recognized Kibble traps.
 
 This stage exists for cases where the local LLM repeatedly preserves a false
-premise even after adversarial review. It is intentionally narrow and fail-closed:
-currently it only recognizes the JSON duplicate-key/backpressure confusion.
+premise or misses an explicit success criterion even after adversarial review.
+It is intentionally narrow and fail-closed: only explicitly recognized semantic
+invariants have deterministic repairs.
 
 It never posts, signs, browses, executes job-provided commands, spends FLOP/tokens,
 or touches wallets. It requires the existing SENT claim, retained exact claim,
@@ -48,23 +49,44 @@ def _review_row(con: Any, job_id: str, room: str) -> dict[str, Any] | None:
 
 def _known_repair(job: dict[str, Any]) -> tuple[str, str] | None:
     text = f"{job.get('title','')} {job.get('body','')}".lower()
+
     duplicate = any(term in text for term in ("duplicate key", "duplicate keys", "duplicate-key"))
     flow = any(term in text for term in ("backpressure", "congestion", "flow control", "throttle", "throttling", "queue"))
-    if not (duplicate and flow):
-        return None
+    if duplicate and flow:
+        answer = (
+            "Duplicate keys do not provide backpressure; which value wins is parser-dependent JSON semantics. "
+            "Backpressure must be implemented by the processing pipeline itself, for example with a bounded queue "
+            "or an explicit credit/semaphore. When the queue is full or credits are exhausted, upstream producers "
+            "must block, pause reads, or throttle until consumers free capacity. Therefore producers should react "
+            "to queue or credit state, not duplicate-key parsing."
+        )
+        critique = (
+            "The model repair preserved the false premise that duplicate-key semantics can signal congestion. "
+            "Applied the known domain invariant that JSON parsing semantics and runtime backpressure are separate."
+        )
+        return answer, critique
 
-    answer = (
-        "Duplicate keys do not provide backpressure; which value wins is parser-dependent JSON semantics. "
-        "Backpressure must be implemented by the processing pipeline itself, for example with a bounded queue "
-        "or an explicit credit/semaphore. When the queue is full or credits are exhausted, upstream producers "
-        "must block, pause reads, or throttle until consumers free capacity. Therefore producers should react "
-        "to queue or credit state, not duplicate-key parsing."
+    pipeline_exit = (
+        "exit code" in text
+        and "pipeline" in text
+        and "last command" in text
+        and "noise" in text
+        and any(term in text for term in ("worth keeping", "worth recording", "field worth keeping"))
     )
-    critique = (
-        "The model repair preserved the false premise that duplicate-key semantics can signal congestion. "
-        "Applied the known domain invariant that JSON parsing semantics and runtime backpressure are separate."
-    )
-    return answer, critique
+    if pipeline_exit:
+        answer = (
+            "Keep a per_stage_status field containing each stage/command identity and its exit code; "
+            "it identifies the command that actually failed. Noise is the final/last-command exit code "
+            "by itself, because it can be 0 even when an earlier stage failed."
+        )
+        critique = (
+            "The model returned an unlabeled list and did not satisfy the explicit keep-versus-noise success "
+            "criterion. Applied the pipeline invariant that the last command's status alone can hide an earlier "
+            "failure, while per-stage status preserves the failing stage."
+        )
+        return answer, critique
+
+    return None
 
 
 def repair_known_semantic_trap(
