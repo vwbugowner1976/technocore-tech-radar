@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Resume one locally blocked JOB after the known unchanged-quality condition.
+"""Resume one locally blocked JOB after a known unchanged-quality condition.
 
-This helper exists only for jobs that were already CLAIMed and then blocked by
-an older quality gate with `quality repair returned the candidate answer unchanged`.
-It performs no signed write itself. It re-arms only the local post-claim pipeline,
-then delegates to job_action.py, which still requires explicit human confirmation
-immediately before any DELIVER send.
+This helper exists only for jobs that were already CLAIMed and then blocked by a
+known local quality-loop condition. It performs no signed write itself. It
+re-arms only the local post-claim pipeline, then delegates to job_action.py,
+which still requires explicit human confirmation immediately before any DELIVER
+send.
 """
 
 from __future__ import annotations
@@ -19,7 +19,10 @@ from technoscout.db import connect
 from technoscout_cli import database_path, load_config
 
 
-KNOWN_REASON = "quality repair returned the candidate answer unchanged"
+KNOWN_REASONS = (
+    "quality repair returned the candidate answer unchanged",
+    "final quality adjudicator marked REVISED but again returned the candidate answer unchanged",
+)
 
 
 def resume_quality_block(con, cfg, job_id: str, *, room: str = "kibble") -> str:
@@ -33,8 +36,9 @@ def resume_quality_block(con, cfg, job_id: str, *, room: str = "kibble") -> str:
         return "NOT_BLOCKED"
 
     detail = str(tracked["detail"] or "")
-    if not (detail.startswith("quality:") and KNOWN_REASON in detail):
-        print(f"STOP: block reason is not the known unchanged-quality condition: {detail}")
+    known = detail.startswith("quality:") and any(reason in detail for reason in KNOWN_REASONS)
+    if not known:
+        print(f"STOP: block reason is not a known unchanged-quality condition: {detail}")
         return "BLOCKED_OTHER_REASON"
 
     claim_state = _latest_status(
