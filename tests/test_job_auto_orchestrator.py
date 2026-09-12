@@ -34,7 +34,7 @@ class JobAutoOrchestratorTests(unittest.TestCase):
     def tearDown(self):
         self.con.close()
 
-    def _insert_sent_claim(self):
+    def _insert_sent_claim(self, *, tracked=True):
         ensure_claim_schema(self.con)
         self.con.execute(
             """
@@ -51,6 +51,18 @@ class JobAutoOrchestratorTests(unittest.TestCase):
                 "did:key:z6MkWorker", "claimhash", "SENT", 150, "",
             ),
         )
+        if tracked:
+            self.con.execute(
+                """
+                INSERT INTO job_auto_orchestrator(
+                  room,job_id,content_hash,claim_state,pipeline_state,updated_at
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    "kibble", self.job_id, self.digest, "CLAIM_READY",
+                    "WAITING_FOR_HUMAN_CLAIM", self.now,
+                ),
+            )
         self.con.commit()
 
     @staticmethod
@@ -228,8 +240,19 @@ class JobAutoOrchestratorTests(unittest.TestCase):
         self.assertEqual(processed[0]["state"], "DELIVERY_READY")
         self.assertTrue(processed[0]["existing"])
 
+    def test_untracked_historical_sent_claim_is_ignored(self):
+        self._insert_sent_claim(tracked=False)
+
+        processed = process_sent_claims(
+            self.con,
+            self.cfg,
+            pipeline_runner=lambda *a, **k: self.fail("untracked historical claim must not run pipeline"),
+            llm_factory=lambda cfg: self.fail("LLM must not load for untracked historical claim"),
+        )
+        self.assertEqual(processed, [])
+
     def test_historical_sent_delivery_is_ignored(self):
-        self._insert_sent_claim()
+        self._insert_sent_claim(tracked=False)
         ensure_delivery_schema(self.con)
         self.con.execute(
             """
