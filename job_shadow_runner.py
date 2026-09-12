@@ -7,6 +7,7 @@ import argparse
 import sys
 from typing import Any
 
+from job_attest_watcher import scan_attest_notifications
 from job_shadow import print_job_shadow_status, sync_job_shadow
 from job_shadow_policy import deterministic_shadow_evaluator
 from technoscout.common import technocore_json
@@ -49,6 +50,34 @@ def run_once(config_path: str, verbose: bool = False) -> int:
                 f"updated={stats.get('updated',0)} "
                 f"lifecycle={stats.get('lifecycle_updates',0)} "
                 f"errors={stats.get('errors',0)}",
+                flush=True,
+            )
+
+        # Local notification side effect only. This performs GETs against
+        # Technocore and can POST only to the configured local/self-hosted ntfy
+        # endpoint. Notification failure never changes Job Shadow success.
+        try:
+            attest = scan_attest_notifications(con, cfg)
+            if (
+                attest.get("observed", 0)
+                or attest.get("published", 0)
+                or attest.get("failed", 0)
+                or attest.get("disabled", 0)
+            ):
+                print(
+                    "[job-attest-notify] "
+                    f"messages={attest.get('messages',0)} "
+                    f"observed={attest.get('observed',0)} "
+                    f"published={attest.get('published',0)} "
+                    f"failed={attest.get('failed',0)} "
+                    f"disabled={attest.get('disabled',0)} "
+                    f"skipped={attest.get('skipped',0)}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"[job-attest-notify] WARN {type(exc).__name__}: {exc}",
+                file=sys.stderr,
                 flush=True,
             )
         return 0
