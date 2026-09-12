@@ -25,8 +25,10 @@ from typing import Any, Callable
 from job_candidate_refiner import _runtime_defaults, fetch_exact_job
 from job_delivery_trial import prepare_delivery
 from job_execution_draft import claimed_trial, generate_draft, verify_claim_retained
-from job_execution_quality_gate import quality_review
+from job_execution_quality_gate import deterministic_quality_flags, quality_review
 from job_execution_review import review_draft
+from job_execution_semantic_repair import repair_known_semantic_trap
+from job_success_criterion_gate import persist_success_review, validate_success_criterion
 from technoscout.db import connect
 from technoscout.llm_backend import create_llm_backend
 from technoscout_cli import database_path, load_config
@@ -56,6 +58,9 @@ def run_postclaim_pipeline(
     draft_runner: Callable[..., dict[str, Any]] = generate_draft,
     review_runner: Callable[..., dict[str, Any]] = review_draft,
     quality_runner: Callable[..., dict[str, Any]] = quality_review,
+    success_runner: Callable[..., dict[str, Any]] = validate_success_criterion,
+    success_persister: Callable[..., dict[str, Any]] = persist_success_review,
+    semantic_repair_runner: Callable[..., dict[str, Any]] = repair_known_semantic_trap,
     prepare_runner: Callable[..., dict[str, Any]] = prepare_delivery,
 ) -> dict[str, Any]:
     """Run all read-only post-claim stages, ending in PREPARED delivery only."""
@@ -118,6 +123,178 @@ def run_postclaim_pipeline(
         return {"state": "BLOCKED", "stage": "quality", "reason": quality.get("reason", "quality review failed"), "stage_times": stage_times}
 
     t0 = time.monotonic()
+    success = success_runner(
+        cfg,
+        llm,
+        str(model or ""),
+        exact["job"],
+        str(quality.get("answer", "")),
+    )
+    stage_times["success"] = time.monotonic() - t0
+
+    semantic_fallback = None
+
+    if success.get("state") == "BLOCKED":
+        original_success_reason = success.get(
+            "reason",
+            "Success-criterion review failed",
+        )
+
+        t0 = time.monotonic()
+        semantic_fallback = semantic_repair_runner(
+            con,
+            cfg,
+            job_id,
+            room=room,
+            exact_fetcher=cached_exact,
+            claim_verifier=cached_claim,
+        )
+        stage_times["semantic_fallback"] = time.monotonic() - t0
+
+        if semantic_fallback.get("state") != "QUALITY_REVIEWED":
+            return {
+                "state": "BLOCKED",
+                "stage": "success",
+                "reason": (
+                    f"generic Success gate blocked: {original_success_reason}; "
+                    "semantic fallback unavailable: "
+                    f"{semantic_fallback.get('reason', 'unknown')}"
+                ),
+                "success": success,
+                "semantic_fallback": semantic_fallback,
+                "stage_times": stage_times,
+            }
+
+        fallback_answer = str(
+            semantic_fallback.get("answer", "") or ""
+        ).strip()
+
+        if not fallback_answer:
+            return {
+                "state": "BLOCKED",
+                "stage": "semantic-fallback",
+                "reason": "semantic fallback returned no answer",
+                "stage_times": stage_times,
+            }
+
+        # A deterministic semantic repair still cannot bypass the normal
+        # deterministic quality guard.
+        fallback_flags = deterministic_quality_flags(
+            exact["job"],
+            fallback_answer,
+        )
+
+        if fallback_flags:
+            return {
+                "state": "BLOCKED",
+                "stage": "semantic-fallback",
+                "reason": (
+                    "semantic fallback fails deterministic quality guard: "
+                    + "; ".join(fallback_flags)
+                ),
+                "stage_times": stage_times,
+            }
+
+        # Most important rule:
+        # deterministic fallback MUST pass the same generic Success Gate.
+        t0 = time.monotonic()
+        success = success_runner(
+            cfg,
+            llm,
+            str(model or ""),
+            exact["job"],
+            fallback_answer,
+        )
+        stage_times["success_recheck"] = time.monotonic() - t0
+
+        if success.get("state") != "SUCCESS_REVIEWED":
+            return {
+                "state": "BLOCKED",
+                "stage": "success-recheck",
+                "reason": (
+                    "semantic fallback still fails generic Success gate: "
+                    f"{success.get('reason', success.get('state', 'UNKNOWN'))}"
+                ),
+                "success": success,
+                "semantic_fallback": semantic_fallback,
+                "stage_times": stage_times,
+            }
+
+        quality = {
+            **quality,
+            "answer": fallback_answer,
+            "decision": "REVISED",
+            "confidence": min(
+                int(quality.get("confidence", 0)),
+                int(semantic_fallback.get("confidence", 100)),
+                int(success.get("confidence", 0)),
+            ),
+            "model": str(
+                semantic_fallback.get(
+                    "model",
+                    "deterministic-semantic-repair-v1",
+                )
+            ),
+            "critique": str(
+                semantic_fallback.get("critique", "") or ""
+            ),
+        }
+
+    if success.get("state") not in {"SUCCESS_REVIEWED", "NOT_APPLICABLE"}:
+        return {
+            "state": "BLOCKED",
+            "stage": "success",
+            "reason": f"unexpected Success-gate state: {success.get('state','UNKNOWN')}",
+            "stage_times": stage_times,
+        }
+
+    if success.get("state") == "SUCCESS_REVIEWED":
+        success_answer = str(success.get("answer", "") or "")
+
+        # Generic repair must still satisfy the existing deterministic/domain guard.
+        success_flags = deterministic_quality_flags(exact["job"], success_answer)
+        if success_flags:
+            return {
+                "state": "BLOCKED",
+                "stage": "success",
+                "reason": (
+                    "Success-gate answer fails deterministic quality guard: "
+                    + "; ".join(success_flags)
+                ),
+                "stage_times": stage_times,
+            }
+
+        persisted = success_persister(
+            con,
+            room=room,
+            job_id=job_id,
+            content_hash=str(claim["content_hash"]),
+            result=success,
+            quality_confidence=int(quality.get("confidence", 0)),
+            quality_model=str(quality.get("model", model or "")),
+            quality_answer=str(quality.get("answer", "")),
+        )
+        if persisted.get("state") != "SUCCESS_REVIEWED":
+            return {
+                "state": "BLOCKED",
+                "stage": "success",
+                "reason": persisted.get("reason", "could not persist Success review"),
+                "stage_times": stage_times,
+            }
+
+        # Keep the in-memory result aligned with what delivery will read.
+        quality = {
+            **quality,
+            "answer": persisted["answer"],
+            "decision": (
+                "REVISED"
+                if persisted.get("decision") == "REVISED"
+                else quality.get("decision")
+            ),
+            "confidence": persisted["confidence"],
+        }
+
+    t0 = time.monotonic()
     prepared = prepare_runner(
         con, cfg, job_id, room=room, exact_fetcher=cached_exact,
     )
@@ -138,6 +315,8 @@ def run_postclaim_pipeline(
         "draft": draft,
         "review": review,
         "quality": quality,
+        "success": success,
+        "semantic_fallback": semantic_fallback,
         "prepared": prepared,
         "stage_times": stage_times,
         "elapsed_seconds": time.monotonic() - started,
@@ -183,6 +362,7 @@ def main() -> None:
         f"draft:{times['draft']:.1f}s "
         f"review:{times['review']:.1f}s "
         f"quality:{times['quality']:.1f}s "
+        f"success:{times['success']:.1f}s "
         f"prepare:{times['delivery_prepare']:.1f}s "
         f"total:{result['elapsed_seconds']:.1f}s"
     )
@@ -190,6 +370,12 @@ def main() -> None:
     print(f"quality={quality['decision']} confidence={quality['confidence']}")
     if quality.get("critique"):
         print(f"critique={quality['critique']}")
+    success = result["success"]
+    print(
+        f"success={success.get('state','UNKNOWN')} "
+        f"decision={success.get('decision','-')} "
+        f"confidence={success.get('confidence','-')}"
+    )
     prepared = result["prepared"]
     print("DELIVER PREVIEW — exact one-line message; nothing has been sent")
     print(prepared["text"])

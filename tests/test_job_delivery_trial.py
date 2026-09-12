@@ -12,6 +12,7 @@ from job_delivery_trial import (
     send_delivery,
 )
 from job_execution_quality_gate import ensure_quality_schema
+from job_success_criterion_gate import ensure_success_schema
 from technoscout.db import connect
 
 
@@ -41,6 +42,7 @@ class JobDeliveryTrialTests(unittest.TestCase):
         self.con = connect(Path(":memory:"))
         ensure_claim_schema(self.con)
         ensure_quality_schema(self.con)
+        ensure_success_schema(self.con)
         ensure_delivery_schema(self.con)
         self.job_id = "kabcdef0123"
         self.digest = "digest"
@@ -245,6 +247,89 @@ class JobDeliveryTrialTests(unittest.TestCase):
         )
         self.assertEqual(result["state"], "READY_CONFIRMED")
         self.assertEqual(result["snapshot_attempts"], 2)
+
+
+    def test_explicit_success_without_success_review_blocks_prepare(self):
+        def exact_success(cfg, candidate):
+            return {
+                "state": "EXACT",
+                "job": {
+                    "verb": "JOB",
+                    "job_id": self.job_id,
+                    "job_type": "coordinate",
+                    "title": "example",
+                    "body": (
+                        "Explain the decision. "
+                        "Success: names one constraint and one rejected alternative."
+                    ),
+                },
+            }
+
+        result = prepare_delivery(
+            self.con,
+            self.cfg,
+            self.job_id,
+            readiness_checker=self.ready,
+            exact_fetcher=exact_success,
+        )
+
+        self.assertEqual(result["state"], "BLOCKED")
+        self.assertIn("SUCCESS_REVIEWED", result["reason"])
+
+    def test_explicit_success_with_matching_review_can_prepare(self):
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        ah = hashlib.sha256(self.answer.encode("utf-8")).hexdigest()
+
+        self.con.execute(
+            """
+            INSERT INTO job_execution_success_reviews(
+              room,job_id,content_hash,reviewed_at,model,decision,confidence,
+              success_clause,contract_json,critique,answer_hash,answer_text,status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "kibble",
+                self.job_id,
+                self.digest,
+                now,
+                "generic-success-criterion-gate-v1",
+                "PASS",
+                85,
+                "names one constraint and one rejected alternative.",
+                "{}",
+                "",
+                ah,
+                self.answer,
+                "SUCCESS_REVIEWED",
+            ),
+        )
+        self.con.commit()
+
+        def exact_success(cfg, candidate):
+            return {
+                "state": "EXACT",
+                "job": {
+                    "verb": "JOB",
+                    "job_id": self.job_id,
+                    "job_type": "coordinate",
+                    "title": "example",
+                    "body": (
+                        "Explain the decision. "
+                        "Success: names one constraint and one rejected alternative."
+                    ),
+                },
+            }
+
+        result = prepare_delivery(
+            self.con,
+            self.cfg,
+            self.job_id,
+            readiness_checker=self.ready,
+            exact_fetcher=exact_success,
+            now=100.0,
+        )
+
+        self.assertEqual(result["state"], "PREPARED")
 
 
 if __name__ == "__main__":

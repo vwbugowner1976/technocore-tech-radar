@@ -30,6 +30,7 @@ from job_candidate_refiner import fetch_exact_job
 from job_claim_trial import ensure_claim_schema
 from job_execution_draft import claimed_trial
 from job_execution_quality_gate import deterministic_quality_flags, ensure_quality_schema
+from job_success_criterion_gate import extract_success_clause, get_success_review
 from job_live_revalidator import retained_export_messages
 from job_shadow import parse_kibble_message, sender_of
 from technoscout.common import room_messages, seq_of, technocore_json
@@ -285,6 +286,37 @@ def prepare_delivery(
     exact = exact_fetcher(cfg, candidate) if exact_fetcher is not None else fetch_exact_job(cfg, candidate)
     if exact.get("state") != "EXACT":
         return {"state": "BLOCKED", "reason": f"exact JOB fetch failed: {exact.get('state','UNKNOWN')}"}
+
+    # An explicit Success: clause may not bypass the generic Success Gate.
+    _, success_clause = extract_success_clause(exact["job"])
+    if success_clause:
+        success = get_success_review(con, room, job_id)
+        if success is None:
+            return {
+                "state": "BLOCKED",
+                "reason": "explicit Success criterion has no SUCCESS_REVIEWED gate result",
+            }
+        if str(success["status"]) != "SUCCESS_REVIEWED":
+            return {
+                "state": "BLOCKED",
+                "reason": f"success-review status is {success['status']}, not SUCCESS_REVIEWED",
+            }
+        if str(success["content_hash"]) != str(claim["content_hash"]):
+            return {
+                "state": "BLOCKED",
+                "reason": "success-review content binding does not match claimed JOB",
+            }
+        if str(success["answer_hash"]) != str(quality["answer_hash"]):
+            return {
+                "state": "BLOCKED",
+                "reason": "success-reviewed answer does not match quality-reviewed answer",
+            }
+        if str(success["answer_text"]) != str(quality["answer_text"]):
+            return {
+                "state": "BLOCKED",
+                "reason": "success-reviewed answer text does not match quality-reviewed answer",
+            }
+
     flags = deterministic_quality_flags(exact["job"], str(quality["answer_text"]))
     if flags:
         return {"state": "BLOCKED", "reason": "quality answer fails deterministic guard at delivery: " + "; ".join(flags)}

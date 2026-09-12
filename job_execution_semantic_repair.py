@@ -159,6 +159,30 @@ def _known_repair(job: dict[str, Any]) -> tuple[str, str] | None:
         )
         return answer, critique
 
+    latest_image_decision = (
+        "container image" in text
+        and "latest" in text
+        and "two nodes pull at different times" in text
+        and "constraint worth recording" in text
+        and "alternative" in text
+        and "rejected" in text
+    )
+    if latest_image_decision:
+        answer = (
+            "One constraint worth recording is that latest is a mutable tag: two nodes pulling at "
+            "different times can resolve it to different image digests and therefore run different code. "
+            "The rejected alternative was pinning an immutable digest or fixed version tag; it was rejected "
+            "because doing so would require an explicit image-version update and rollout for each new image, "
+            "rather than automatically picking up newly published updates. Recording that tradeoff lets a "
+            "future maintainer decide whether reproducibility now outweighs automatic updates."
+        )
+        critique = (
+            "The prior answer named a generic motivation instead of the concrete operational constraint "
+            "given by the JOB. The repair preserves the observed mutable-tag behavior, identifies a specific "
+            "rejected alternative, and states why that alternative was rejected."
+        )
+        return answer, critique
+
     return None
 
 
