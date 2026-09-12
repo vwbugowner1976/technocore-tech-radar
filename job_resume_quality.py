@@ -23,12 +23,18 @@ KNOWN_REASONS = (
     "quality repair returned the candidate answer unchanged",
     "final quality adjudicator marked REVISED but again returned the candidate answer unchanged",
     "adjudicator-guided repair returned the candidate answer unchanged",
+    "adjudicator-guided repair already attempted: UNCHANGED",
     (
         "The candidate answer does not provide a concrete failure mode and leading "
         "indicator as requested. It only mentions memory fragmentation and an "
         "out-of-memory (OOM) error as the failure mode, without specifying the exact "
         "signal that shows up before it."
     ),
+)
+
+KNOWN_PREFIXES = (
+    "quality:",
+    "quality-adjudication-repair:",
 )
 
 
@@ -43,7 +49,10 @@ def resume_quality_block(con, cfg, job_id: str, *, room: str = "kibble") -> str:
         return "NOT_BLOCKED"
 
     detail = str(tracked["detail"] or "")
-    known = detail.startswith("quality:") and any(reason in detail for reason in KNOWN_REASONS)
+    known = (
+        any(detail.startswith(prefix) for prefix in KNOWN_PREFIXES)
+        and any(reason in detail for reason in KNOWN_REASONS)
+    )
     if not known:
         print(f"STOP: block reason is not a known resumable quality condition: {detail}")
         return "BLOCKED_OTHER_REASON"
