@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 _JOB_ID_RE = re.compile(r"^k[0-9a-f]{10}$")
 _RESULT_RE = re.compile(r"[^a-z0-9_.+-]+")
+_STAGE_RE = re.compile(r"[^a-z0-9_.+-]+")
 
 
 def _publish_ntfy(
@@ -64,26 +65,95 @@ def _publish_ntfy(
         return {"state": "FAILED", "detail": f"{type(exc).__name__}: {exc}"[:300]}
 
 
-def notify_ready_candidate(
+def _human_action_notice(
     cfg: dict[str, Any],
     job_id: str,
     *,
+    message: str,
+    tag: str,
     opener: Callable[..., Any] | None = None,
 ) -> dict[str, str]:
-    """Publish one minimal READY notification to a configured ntfy topic."""
     url = str(cfg.get("job_ready_ntfy_url", "") or "").strip()
     if not url:
         return {"state": "DISABLED", "detail": "job_ready_ntfy_url is not configured"}
     if not _JOB_ID_RE.fullmatch(str(job_id or "")):
-        return {"state": "SKIPPED", "detail": "invalid READY job id"}
+        return {"state": "SKIPPED", "detail": "invalid job id"}
 
     title = str(cfg.get("job_ready_ntfy_title", "TechnoScout") or "TechnoScout")
     return _publish_ntfy(
         cfg,
         url=url,
         title=title,
+        message=message,
+        tag=tag,
+        opener=opener,
+    )
+
+
+def notify_ready_candidate(
+    cfg: dict[str, Any],
+    job_id: str,
+    *,
+    opener: Callable[..., Any] | None = None,
+) -> dict[str, str]:
+    """Legacy READY notification kept for compatibility."""
+    return _human_action_notice(
+        cfg,
+        job_id,
         message=f"READY candidate={job_id}",
         tag="robot",
+        opener=opener,
+    )
+
+
+def notify_claim_ready(
+    cfg: dict[str, Any],
+    job_id: str,
+    *,
+    opener: Callable[..., Any] | None = None,
+) -> dict[str, str]:
+    """Notify only when a local CLAIM is prepared and human action is required."""
+    return _human_action_notice(
+        cfg,
+        job_id,
+        message=f"CLAIM_READY job={job_id}",
+        tag="hand",
+        opener=opener,
+    )
+
+
+def notify_delivery_ready(
+    cfg: dict[str, Any],
+    job_id: str,
+    *,
+    opener: Callable[..., Any] | None = None,
+) -> dict[str, str]:
+    """Notify only when a DELIVER preview is prepared and human action is required."""
+    return _human_action_notice(
+        cfg,
+        job_id,
+        message=f"DELIVERY_READY job={job_id}",
+        tag="outbox_tray",
+        opener=opener,
+    )
+
+
+def notify_job_blocked(
+    cfg: dict[str, Any],
+    job_id: str,
+    stage: str,
+    *,
+    opener: Callable[..., Any] | None = None,
+) -> dict[str, str]:
+    """Publish a minimal blocked-state notification without raw JOB data."""
+    safe_stage = _STAGE_RE.sub("-", str(stage or "unknown").strip().lower()).strip("-")[:32]
+    if not safe_stage:
+        safe_stage = "unknown"
+    return _human_action_notice(
+        cfg,
+        job_id,
+        message=f"BLOCKED job={job_id} stage={safe_stage}",
+        tag="warning",
         opener=opener,
     )
 
