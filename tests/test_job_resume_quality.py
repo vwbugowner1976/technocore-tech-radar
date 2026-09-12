@@ -37,8 +37,8 @@ class JobResumeQualityTests(unittest.TestCase):
             """,
             (
                 "kibble", self.job_id, self.digest, 100, "did:key:z6MkIssuer", "explain",
-                now, 80, 90, 95, 1.0, 2.0, 1.1, 2.1, 1.2,
-                "did:key:z6MkWorker", "claimhash", "SENT", 150, "",
+                now, 80,90,95,1.0,2.0,1.1,2.1,1.2,
+                "did:key:z6MkWorker","claimhash","SENT",150,"",
             ),
         )
         self.con.commit()
@@ -72,6 +72,27 @@ class JobResumeQualityTests(unittest.TestCase):
             WHERE job_id=?
             """,
             (self.job_id,),
+        )
+        self.con.commit()
+        with patch("job_resume_quality.run_action", return_value="DELIVERY_READY") as action:
+            state = resume_quality_block(self.con, {}, self.job_id)
+        self.assertEqual(state, "DELIVERY_READY")
+        action.assert_called_once_with(self.con, {}, self.job_id, room="kibble")
+
+    def test_concrete_gpu_adjudicator_reason_can_resume(self):
+        self.con.execute(
+            """
+            UPDATE job_auto_orchestrator
+            SET detail=?
+            WHERE job_id=?
+            """,
+            (
+                "quality: The candidate answer does not provide a concrete failure mode and "
+                "leading indicator as requested. It only mentions memory fragmentation and an "
+                "out-of-memory (OOM) error as the failure mode, without specifying the exact "
+                "signal that shows up before it.",
+                self.job_id,
+            ),
         )
         self.con.commit()
         with patch("job_resume_quality.run_action", return_value="DELIVERY_READY") as action:
