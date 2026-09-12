@@ -51,6 +51,17 @@ Review the prior draft against the exact JOB, especially every explicit success
 criterion. Check for hidden scaling variables, incorrect simplifications, and
 whether the answer names the requested metric/number unambiguously. If the prior
 draft is incomplete but the task is still safely self-contained, revise it.
+
+GROUNDING PRESERVATION:
+When the JOB states a concrete observed behavior, failure condition, state
+mismatch, timing/order fact, or limitation that is relevant to interpreting or
+justifying a Success requirement, preserve that observation explicitly in the
+final answer and connect it directly to the requested diagnosis, choice, or
+preventive action. Do not replace a concrete observation with only a generic
+label or recommendation. Do not invent new facts; preserve only facts stated in
+the JOB.
+As reviewer, treat omission or weakening of such a relevant concrete JOB
+observation as an incomplete answer and revise it when safe.
 If safe self-contained completion is not possible, return BLOCKED.
 
 Prefer a concise answer that directly satisfies the JOB rather than a generic

@@ -485,5 +485,142 @@ class SuccessCriterionGateTests(unittest.TestCase):
         self.assertEqual(result["state"], "BLOCKED")
 
 
+
+    def test_signal_handling_answer_without_failure_observation_is_blocked(self):
+        job = {
+            "title": (
+                "Post-mortem analysis framework for a container entrypoint "
+                "that ignores signals outages"
+            ),
+            "body": (
+                "Structure the incident review process following a severe outage "
+                "in a container entrypoint that ignores signals to isolate root "
+                "causes from contributing factors. Graceful shutdown never happens "
+                "and in-flight requests are killed. Success: names one root-cause "
+                "taxonomy category and one preventive action item."
+            ),
+        }
+
+        weak = (
+            "Signal Handling Deficiency, Implement graceful shutdown mechanisms "
+            "in the container entrypoint. Review Process: Identify the signal "
+            "handling mechanism. Determine if graceful shutdown is implemented. "
+            "Analyze logs for in-flight requests."
+        )
+
+        caller = FakeCaller([
+            {
+                "grounding_ids": ["C2"],
+            },
+            {
+                "decision": "PASS",
+                "confidence": 100,
+                "checks": [
+                    {
+                        "id": "R1",
+                        "satisfied": True,
+                        "evidence_ids": ["A1"],
+                    },
+                    {
+                        "id": "R2",
+                        "satisfied": True,
+                        "evidence_ids": ["A1"],
+                    },
+                ],
+                "grounding_checks": [
+                    {
+                        "id": "G1",
+                        "satisfied": False,
+                        "evidence_ids": [],
+                    },
+                ],
+                "critique": "success wording is present but the concrete failure observation is not preserved",
+                "answer": weak,
+            },
+        ])
+
+        result = validate_success_criterion(
+            {"job_success_repair_attempts": 0},
+            object(),
+            "fake",
+            job,
+            weak,
+            caller=caller,
+        )
+
+        self.assertEqual(result["state"], "BLOCKED")
+        self.assertEqual(result["verdict"]["missing_requirements"], [])
+        self.assertEqual(result["verdict"]["missing_grounding"], ["G1"])
+
+
+    def test_signal_handling_answer_with_failure_observation_passes(self):
+        job = {
+            "title": (
+                "Post-mortem analysis framework for a container entrypoint "
+                "that ignores signals outages"
+            ),
+            "body": (
+                "Structure the incident review process following a severe outage "
+                "in a container entrypoint that ignores signals to isolate root "
+                "causes from contributing factors. Graceful shutdown never happens "
+                "and in-flight requests are killed. Success: names one root-cause "
+                "taxonomy category and one preventive action item."
+            ),
+        }
+
+        grounded = (
+            "Root-cause category: signal-handling deficiency. Because the "
+            "entrypoint ignores termination signals, graceful shutdown never "
+            "occurs and in-flight requests are killed. Preventive action: make "
+            "the entrypoint handle or forward termination signals and allow a "
+            "bounded graceful-shutdown period before exit."
+        )
+
+        caller = FakeCaller([
+            {
+                "grounding_ids": ["C2"],
+            },
+            {
+                "decision": "PASS",
+                "confidence": 100,
+                "checks": [
+                    {
+                        "id": "R1",
+                        "satisfied": True,
+                        "evidence_ids": ["A1"],
+                    },
+                    {
+                        "id": "R2",
+                        "satisfied": True,
+                        "evidence_ids": ["A3"],
+                    },
+                ],
+                "grounding_checks": [
+                    {
+                        "id": "G1",
+                        "satisfied": True,
+                        "evidence_ids": ["A2"],
+                    },
+                ],
+                "critique": "all Success requirements and the concrete failure observation are explicit",
+                "answer": grounded,
+            },
+        ])
+
+        result = validate_success_criterion(
+            {"job_success_repair_attempts": 0},
+            object(),
+            "fake",
+            job,
+            grounded,
+            caller=caller,
+        )
+
+        self.assertEqual(result["state"], "SUCCESS_REVIEWED")
+        self.assertEqual(result["decision"], "PASS")
+        self.assertEqual(result["verdict"]["missing_requirements"], [])
+        self.assertEqual(result["verdict"]["missing_grounding"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

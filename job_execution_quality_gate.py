@@ -60,6 +60,18 @@ Always enforce the JOB's explicit Success criterion. If Success asks for two
 contrasting outputs such as one field worth keeping and one that is noise, the
 answer must clearly label both sides; a bare comma-separated list is not enough.
 
+GROUNDING PRESERVATION:
+When the JOB states a concrete observed behavior, failure condition, state
+mismatch, timing/order fact, or limitation that is relevant to interpreting or
+justifying a Success requirement, preserve that observation explicitly in the
+final answer and connect it directly to the requested diagnosis, choice, or
+preventive action. Do not replace a concrete observation with only a generic
+label or recommendation. Do not invent new facts; preserve only facts stated in
+the JOB.
+During adversarial review, a response that satisfies the surface Success wording
+but drops a relevant concrete JOB observation is incomplete. Revise it rather
+than accepting keyword overlap alone.
+
 For an actual capacity/sizing JOB, test whether a hidden multiplicative factor
 exists, especially concurrency, simultaneous in-flight work, duration, queueing,
 per-worker duplication, or spill-to-disk behavior. Construct a counterexample:
@@ -97,6 +109,13 @@ A deterministic checker rejected the candidate answer. Repair ONLY the semantic
 problems listed in deterministic_failures while still answering the actual JOB.
 Do not import unrelated concepts. The repaired answer must directly satisfy every
 listed deterministic failure.
+
+GROUNDING PRESERVATION:
+When the JOB states a concrete observed behavior, failure condition, state
+mismatch, timing/order fact, or limitation relevant to the requested result,
+preserve that observation explicitly in the repaired answer and connect it
+directly to the diagnosis, choice, or preventive action. Do not replace a
+concrete JOB observation with only a generic label or recommendation.
 
 When the JOB's Success criterion asks for one thing to keep and one thing that is
 noise, explicitly use that contrast in the repaired answer. Do not return an
@@ -476,13 +495,40 @@ def quality_review(
     )
     result = _normalize(raw)
     if result["decision"] == "BLOCKED":
-        return {"state": "BLOCKED", "reason": result["critique"] or "quality reviewer blocked the answer"}
+        return {
+            "state": "BLOCKED",
+            "reason": result["critique"] or "quality reviewer blocked the answer",
+        }
 
+    prior_answer = _clean(prior["answer_text"], 4000)
     flags_after = deterministic_quality_flags(exact["job"], result["answer"])
+
+    # A reviewer is not allowed to claim REVISED while returning the exact
+    # prior answer. Treat that as a failed revision and send it through the
+    # existing local repair path.
+    unchanged_revision = (
+        result["decision"] == "REVISED"
+        and result["answer"] == prior_answer
+    )
+
     repair_attempted = False
-    repair_attempts = max(0, min(1, int(cfg.get("job_execution_quality_repair_attempts", 1))))
-    if flags_after and repair_attempts:
+    repair_attempts = max(
+        0,
+        min(1, int(cfg.get("job_execution_quality_repair_attempts", 1))),
+    )
+
+    repair_failures = list(flags_after)
+
+    if unchanged_revision:
+        repair_failures.append(
+            "quality reviewer marked REVISED but returned the prior answer "
+            "unchanged; apply the critique and materially correct the answer"
+        )
+
+    if repair_failures and repair_attempts:
         repair_attempted = True
+        candidate_before_repair = result["answer"]
+
         repair_raw = call(
             cfg,
             llm,
@@ -492,27 +538,74 @@ def quality_review(
                 "job": exact["job"],
                 "candidate_answer": result["answer"],
                 "candidate_critique": result["critique"],
-                "deterministic_failures": flags_after,
+                "deterministic_failures": repair_failures,
                 "mode": "local-deterministic-quality-repair-only",
             },
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
         )
+
         repaired = _normalize(repair_raw)
+
         if repaired["decision"] == "BLOCKED":
             return {
                 "state": "BLOCKED",
-                "reason": repaired["critique"] or "quality repair reviewer blocked the answer",
-                "flags": flags_after,
+                "reason": (
+                    repaired["critique"]
+                    or "quality repair reviewer blocked the answer"
+                ),
+                "flags": repair_failures,
                 "repair_attempted": True,
             }
+
+        if repaired["answer"] == candidate_before_repair:
+            unchanged_flags = deterministic_quality_flags(
+                exact["job"],
+                repaired["answer"],
+            )
+
+            if unchanged_flags:
+                return {
+                    "state": "BLOCKED",
+                    "reason": (
+                        "final answer still fails deterministic quality guard: "
+                        + "; ".join(unchanged_flags)
+                    ),
+                    "flags": unchanged_flags,
+                    "repair_attempted": True,
+                }
+
+            return {
+                "state": "BLOCKED",
+                "reason": "quality repair returned the candidate answer unchanged",
+                "flags": repair_failures,
+                "repair_attempted": True,
+            }
+
         result = repaired
-        flags_after = deterministic_quality_flags(exact["job"], result["answer"])
+        flags_after = deterministic_quality_flags(
+            exact["job"],
+            result["answer"],
+        )
+
+    elif unchanged_revision:
+        return {
+            "state": "BLOCKED",
+            "reason": (
+                "quality reviewer marked REVISED but returned the prior "
+                "answer unchanged and quality repair is disabled"
+            ),
+            "flags": repair_failures,
+            "repair_attempted": False,
+        }
 
     if flags_after:
         return {
             "state": "BLOCKED",
-            "reason": "final answer still fails deterministic quality guard: " + "; ".join(flags_after),
+            "reason": (
+                "final answer still fails deterministic quality guard: "
+                + "; ".join(flags_after)
+            ),
             "flags": flags_after,
             "repair_attempted": repair_attempted,
         }
