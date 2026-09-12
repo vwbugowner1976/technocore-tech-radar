@@ -1,7 +1,10 @@
 import unittest
-from types import SimpleNamespace
 
-from technoscout_notify import notify_ready_candidate
+from technoscout_notify import (
+    notify_claim_ready,
+    notify_delivery_ready,
+    notify_ready_candidate,
+)
 
 
 class TechnoScoutNotifyTests(unittest.TestCase):
@@ -32,7 +35,8 @@ class TechnoScoutNotifyTests(unittest.TestCase):
         self.assertEqual(result["state"], "FAILED")
         self.assertIn("credentials", result["detail"])
 
-    def test_publishes_only_job_id(self):
+    @staticmethod
+    def _capture_notice(notifier, job_id="kabcdef0123"):
         captured = {}
 
         class Response:
@@ -48,18 +52,68 @@ class TechnoScoutNotifyTests(unittest.TestCase):
             captured["timeout"] = timeout
             return Response()
 
-        result = notify_ready_candidate(
+        result = notifier(
             {
                 "job_ready_ntfy_url": "http://127.0.0.1:2586/technoscout-ready",
                 "job_ready_ntfy_title": "TechnoScout",
             },
-            "kabcdef0123",
+            job_id,
             opener=opener,
         )
+        return result, captured
+
+    def test_publishes_only_job_id(self):
+        result, captured = self._capture_notice(notify_ready_candidate)
         self.assertEqual(result["state"], "PUBLISHED_LOCAL")
         self.assertEqual(captured["body"], "READY candidate=kabcdef0123")
         self.assertEqual(captured["title"], "TechnoScout")
         self.assertTrue(captured["closed"])
+
+    def test_claim_ready_contains_copy_paste_workflow_with_two_human_gates(self):
+        result, captured = self._capture_notice(notify_claim_ready, "k632d57232a")
+        self.assertEqual(result["state"], "PUBLISHED_LOCAL")
+        lines = captured["body"].splitlines()
+        self.assertEqual(lines[0], "# CLAIM_READY job=k632d57232a")
+        self.assertTrue(lines[1].startswith("# "))
+        self.assertEqual(len(lines), 3)
+        command = lines[2]
+        self.assertIn('cd "$HOME/technocore-tech-radar"', command)
+        self.assertIn("job_claim_trial.py prepare k632d57232a", command)
+        self.assertIn("job_claim_trial.py approve k632d57232a", command)
+        self.assertIn("job_claim_trial.py send k632d57232a", command)
+        self.assertIn('read -r TS_JOB </dev/tty', command)
+        self.assertIn('read -r TS_SEND </dev/tty', command)
+        self.assertIn('[ "$TS_JOB" = "k632d57232a" ]', command)
+        self.assertIn('[ "$TS_SEND" = "SEND" ]', command)
+        self.assertNotIn("curl", command)
+        self.assertNotIn("http://", command)
+        self.assertNotIn("https://", command)
+
+    def test_delivery_ready_contains_copy_paste_workflow_with_two_human_gates(self):
+        result, captured = self._capture_notice(notify_delivery_ready, "k632d57232a")
+        self.assertEqual(result["state"], "PUBLISHED_LOCAL")
+        lines = captured["body"].splitlines()
+        self.assertEqual(lines[0], "# DELIVERY_READY job=k632d57232a")
+        self.assertEqual(len(lines), 3)
+        command = lines[2]
+        self.assertIn("job_delivery_trial.py prepare k632d57232a", command)
+        self.assertIn("job_delivery_trial.py approve k632d57232a", command)
+        self.assertIn("job_delivery_trial.py send k632d57232a", command)
+        self.assertIn('[ "$TS_JOB" = "k632d57232a" ]', command)
+        self.assertIn('[ "$TS_SEND" = "SEND" ]', command)
+
+    def test_action_notifications_reject_invalid_job_id_before_network(self):
+        calls = []
+
+        def opener(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("network must not be called")
+
+        cfg = {"job_ready_ntfy_url": "http://127.0.0.1:2586/ready"}
+        for notifier in (notify_claim_ready, notify_delivery_ready):
+            result = notifier(cfg, "k123;rm-rf", opener=opener)
+            self.assertEqual(result["state"], "SKIPPED")
+        self.assertEqual(calls, [])
 
     def test_network_failure_is_fail_soft(self):
         def opener(*args, **kwargs):
