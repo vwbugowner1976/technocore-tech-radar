@@ -192,20 +192,22 @@ def prepare_claim_ready(
 
 
 def _sent_claim_rows(con: Any, room: str, limit: int) -> list[Any]:
+    """Return only SENT claims that this orchestrator already tracked pre-send."""
     ensure_auto_schema(con)
     return con.execute(
         """
         SELECT c.room,c.job_id,c.content_hash,c.status,c.sent_seq,
                d.status AS delivery_status,
-               COALESCE(a.pipeline_state,'') AS pipeline_state
+               a.pipeline_state AS pipeline_state
         FROM job_claim_trials AS c
         LEFT JOIN job_delivery_trials AS d
           ON d.room=c.room AND d.job_id=c.job_id AND d.content_hash=c.content_hash
-        LEFT JOIN job_auto_orchestrator AS a
+        JOIN job_auto_orchestrator AS a
           ON a.room=c.room AND a.job_id=c.job_id AND a.content_hash=c.content_hash
         WHERE c.room=? AND c.status='SENT'
           AND COALESCE(d.status,'') != 'SENT'
-          AND COALESCE(a.pipeline_state,'') NOT IN ('DELIVERY_READY','BLOCKED','DELIVERED','DELIVERY_TERMINAL')
+          AND a.claim_state IN ('CLAIM_READY','CLAIM_SENT')
+          AND a.pipeline_state IN ('WAITING_FOR_HUMAN_CLAIM','WAITING_POSTCLAIM')
         ORDER BY c.prepared_at ASC
         LIMIT ?
         """,
@@ -222,7 +224,7 @@ def process_sent_claims(
     pipeline_runner: Callable[..., dict[str, Any]] = run_postclaim_pipeline,
     llm_factory: Callable[[dict[str, Any]], Any] = create_llm_backend,
 ) -> list[dict[str, Any]]:
-    """Run local post-claim work once for newly SENT claims; never DELIVER."""
+    """Run local post-claim work once for newly SENT tracked claims; never DELIVER."""
     rows = _sent_claim_rows(con, room, limit)
     if not rows:
         return []
