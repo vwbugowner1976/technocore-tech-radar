@@ -64,6 +64,21 @@ class JobResumeQualityTests(unittest.TestCase):
         self.assertEqual(claim["status"], "SENT")
         self.assertEqual(claim["sent_seq"], 150)
 
+    def test_legacy_adjudicator_loop_reason_can_resume(self):
+        self.con.execute(
+            """
+            UPDATE job_auto_orchestrator
+            SET detail='quality: final quality adjudicator marked REVISED but again returned the candidate answer unchanged'
+            WHERE job_id=?
+            """,
+            (self.job_id,),
+        )
+        self.con.commit()
+        with patch("job_resume_quality.run_action", return_value="DELIVERY_READY") as action:
+            state = resume_quality_block(self.con, {}, self.job_id)
+        self.assertEqual(state, "DELIVERY_READY")
+        action.assert_called_once_with(self.con, {}, self.job_id, room="kibble")
+
     def test_other_block_reason_is_not_rearmed(self):
         self.con.execute(
             "UPDATE job_auto_orchestrator SET detail='success: unrelated failure' WHERE job_id=?",
