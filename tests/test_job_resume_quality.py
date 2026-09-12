@@ -107,6 +107,18 @@ class JobResumeQualityTests(unittest.TestCase):
         self.con.commit()
         self._assert_resumes()
 
+    def test_legacy_repair_ledger_unchanged_can_resume_to_v2(self):
+        self.con.execute(
+            """
+            UPDATE job_auto_orchestrator
+            SET detail='quality-adjudication-repair: adjudicator-guided repair already attempted: UNCHANGED'
+            WHERE job_id=?
+            """,
+            (self.job_id,),
+        )
+        self.con.commit()
+        self._assert_resumes()
+
     def test_other_block_reason_is_not_rearmed(self):
         self.con.execute(
             "UPDATE job_auto_orchestrator SET detail='success: unrelated failure' WHERE job_id=?",
