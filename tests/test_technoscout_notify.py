@@ -69,7 +69,7 @@ class TechnoScoutNotifyTests(unittest.TestCase):
         self.assertEqual(captured["title"], "TechnoScout")
         self.assertTrue(captured["closed"])
 
-    def test_claim_ready_contains_copy_paste_workflow_with_two_human_gates(self):
+    def test_claim_ready_contains_one_unified_copy_paste_command(self):
         result, captured = self._capture_notice(notify_claim_ready, "k632d57232a")
         self.assertEqual(result["state"], "PUBLISHED_LOCAL")
         lines = captured["body"].splitlines()
@@ -77,30 +77,26 @@ class TechnoScoutNotifyTests(unittest.TestCase):
         self.assertTrue(lines[1].startswith("# "))
         self.assertEqual(len(lines), 3)
         command = lines[2]
-        self.assertIn('cd "$HOME/technocore-tech-radar"', command)
-        self.assertIn("job_claim_trial.py prepare k632d57232a", command)
-        self.assertIn("job_claim_trial.py approve k632d57232a", command)
-        self.assertIn("job_claim_trial.py send k632d57232a", command)
-        self.assertIn('read -r TS_JOB </dev/tty', command)
-        self.assertIn('read -r TS_SEND </dev/tty', command)
-        self.assertIn('[ "$TS_JOB" = "k632d57232a" ]', command)
-        self.assertIn('[ "$TS_SEND" = "SEND" ]', command)
+        self.assertEqual(
+            command,
+            'cd "$HOME/technocore-tech-radar"; .venv/bin/python job_action.py k632d57232a',
+        )
         self.assertNotIn("curl", command)
         self.assertNotIn("http://", command)
         self.assertNotIn("https://", command)
+        self.assertNotIn("job_claim_trial.py send", command)
+        self.assertNotIn("job_delivery_trial.py send", command)
 
-    def test_delivery_ready_contains_copy_paste_workflow_with_two_human_gates(self):
+    def test_delivery_ready_uses_same_unified_entry_command(self):
         result, captured = self._capture_notice(notify_delivery_ready, "k632d57232a")
         self.assertEqual(result["state"], "PUBLISHED_LOCAL")
         lines = captured["body"].splitlines()
         self.assertEqual(lines[0], "# DELIVERY_READY job=k632d57232a")
         self.assertEqual(len(lines), 3)
-        command = lines[2]
-        self.assertIn("job_delivery_trial.py prepare k632d57232a", command)
-        self.assertIn("job_delivery_trial.py approve k632d57232a", command)
-        self.assertIn("job_delivery_trial.py send k632d57232a", command)
-        self.assertIn('[ "$TS_JOB" = "k632d57232a" ]', command)
-        self.assertIn('[ "$TS_SEND" = "SEND" ]', command)
+        self.assertEqual(
+            lines[2],
+            'cd "$HOME/technocore-tech-radar"; .venv/bin/python job_action.py k632d57232a',
+        )
 
     def test_action_notifications_reject_invalid_job_id_before_network(self):
         calls = []
