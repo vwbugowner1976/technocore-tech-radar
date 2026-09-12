@@ -56,6 +56,10 @@ or from an unrelated example in this prompt. In particular, incidental wording
 such as "processing capacity" does not make a flow-control explanation into a
 capacity-sizing task.
 
+Always enforce the JOB's explicit Success criterion. If Success asks for two
+contrasting outputs such as one field worth keeping and one that is noise, the
+answer must clearly label both sides; a bare comma-separated list is not enough.
+
 For an actual capacity/sizing JOB, test whether a hidden multiplicative factor
 exists, especially concurrency, simultaneous in-flight work, duration, queueing,
 per-worker duplication, or spill-to-disk behavior. Construct a counterexample:
@@ -94,6 +98,10 @@ problems listed in deterministic_failures while still answering the actual JOB.
 Do not import unrelated concepts. The repaired answer must directly satisfy every
 listed deterministic failure.
 
+When the JOB's Success criterion asks for one thing to keep and one thing that is
+noise, explicitly use that contrast in the repaired answer. Do not return an
+unlabeled list.
+
 Important flow-control rule: JSON duplicate-key handling is only parser/data
 semantics. Duplicate keys do NOT create backpressure and must never be described
 as a congestion signal. For a duplicate-key/backpressure JOB, explicitly say that
@@ -130,7 +138,7 @@ def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
         confidence = 0
     critique = _clean(raw.get("critique", ""), 1200)
     answer = _clean(raw.get("answer", ""), 4000)
-    if decision in {"PASS", "REVISED"} and not answer:
+    if decision in {"APPROVED", "REVISED"} and not answer:
         decision = "BLOCKED"
         critique = critique or "quality reviewer returned no final answer"
     return {"decision": decision, "confidence": confidence, "critique": critique, "answer": answer}
@@ -157,6 +165,65 @@ def deterministic_quality_flags(job: dict[str, Any], answer: str) -> list[str]:
         metric_words = ("bytes", "memory", "buffer", "concurrent", "aggregate", "capacity", "threshold")
         if not any(term in ans for term in metric_words):
             flags.append("answer does not name an unambiguous capacity metric")
+
+    keep_noise_context = (
+        "noise" in job_text
+        and any(term in job_text for term in ("worth keeping", "field worth keeping", "worth recording"))
+    )
+    if keep_noise_context:
+        keep_explicit = any(
+            term in ans
+            for term in (
+                "keep ",
+                "keep:",
+                "worth keeping",
+                "record ",
+                "retain ",
+                "preserve ",
+            )
+        )
+        noise_explicit = "noise" in ans
+        if not (keep_explicit and noise_explicit):
+            flags.append("answer does not explicitly identify one field to keep and one field that is noise")
+
+    pipeline_exit_context = (
+        keep_noise_context
+        and "exit code" in job_text
+        and "pipeline" in job_text
+        and "last command" in job_text
+    )
+    if pipeline_exit_context:
+        per_stage = any(
+            term in ans
+            for term in (
+                "per-stage",
+                "per stage",
+                "per_stage_status",
+                "stage/command identity",
+                "stage identity",
+                "exit-code vector",
+                "exit code vector",
+            )
+        )
+        final_only_noise = (
+            "noise" in ans
+            and any(
+                term in ans
+                for term in (
+                    "last-command exit code",
+                    "last command exit code",
+                    "final/last-command exit code",
+                    "final pipeline exit code",
+                    "final exit code by itself",
+                )
+            )
+        )
+        if not per_stage:
+            flags.append("pipeline exit-code answer does not preserve the failing stage with per-stage status")
+        if not final_only_noise:
+            flags.append("pipeline exit-code answer does not identify the final/last-command status alone as noise")
+        if any(term in ans for term in ("command is noise", "noise is command", "noise: command")):
+            flags.append("pipeline exit-code answer incorrectly labels command identity itself as noise")
 
     duplicate_key_context = any(term in job_text for term in ("duplicate key", "duplicate keys", "duplicate-key"))
     flow_control_context = any(term in job_text for term in ("backpressure", "congestion", "flow control", "throttle", "throttling", "queue"))
@@ -205,9 +272,6 @@ def deterministic_quality_flags(job: dict[str, Any], answer: str) -> list[str]:
         if not explicit_flow_mechanism:
             flags.append("answer omits an explicit runtime mechanism that propagates backpressure upstream")
 
-        # Explicitly reject the known false mechanism even if a later sentence
-        # contains the right words. This prevents a contradictory answer from
-        # satisfying the positive substring checks above.
         false_signal_claims = (
             "duplicate keys can be used to signal",
             "duplicate key can be used to signal",
