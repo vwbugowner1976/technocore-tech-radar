@@ -69,34 +69,31 @@ class TechnoScoutNotifyTests(unittest.TestCase):
         self.assertEqual(captured["title"], "TechnoScout")
         self.assertTrue(captured["closed"])
 
-    def test_claim_ready_contains_one_unified_copy_paste_command(self):
+    def test_claim_ready_is_exactly_one_copy_paste_command(self):
         result, captured = self._capture_notice(notify_claim_ready, "k632d57232a")
         self.assertEqual(result["state"], "PUBLISHED_LOCAL")
-        lines = captured["body"].splitlines()
-        self.assertEqual(lines[0], "# CLAIM_READY job=k632d57232a")
-        self.assertTrue(lines[1].startswith("# "))
-        self.assertEqual(len(lines), 3)
-        command = lines[2]
+        command = captured["body"]
         self.assertEqual(
             command,
             'cd "$HOME/technocore-tech-radar"; .venv/bin/python job_action.py k632d57232a',
         )
+        self.assertNotIn("\n", command)
+        self.assertFalse(command.startswith("#"))
         self.assertNotIn("curl", command)
         self.assertNotIn("http://", command)
         self.assertNotIn("https://", command)
         self.assertNotIn("job_claim_trial.py send", command)
         self.assertNotIn("job_delivery_trial.py send", command)
 
-    def test_delivery_ready_uses_same_unified_entry_command(self):
+    def test_delivery_ready_uses_same_single_line_entry_command(self):
         result, captured = self._capture_notice(notify_delivery_ready, "k632d57232a")
         self.assertEqual(result["state"], "PUBLISHED_LOCAL")
-        lines = captured["body"].splitlines()
-        self.assertEqual(lines[0], "# DELIVERY_READY job=k632d57232a")
-        self.assertEqual(len(lines), 3)
         self.assertEqual(
-            lines[2],
+            captured["body"],
             'cd "$HOME/technocore-tech-radar"; .venv/bin/python job_action.py k632d57232a',
         )
+        self.assertNotIn("\n", captured["body"])
+        self.assertFalse(captured["body"].startswith("#"))
 
     def test_action_notifications_reject_invalid_job_id_before_network(self):
         calls = []
