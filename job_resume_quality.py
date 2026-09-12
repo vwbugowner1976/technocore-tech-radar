@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Resume one locally blocked JOB after a known unchanged-quality condition.
+"""Resume one locally blocked JOB after a known quality condition.
 
 This helper exists only for jobs that were already CLAIMed and then blocked by a
-known local quality-loop condition. It performs no signed write itself. It
-re-arms only the local post-claim pipeline, then delegates to job_action.py,
-which still requires explicit human confirmation immediately before any DELIVER
-send.
+known local quality condition that newer code can handle without re-CLAIMing. It
+performs no signed write itself. It re-arms only the local post-claim pipeline,
+then delegates to job_action.py, which still requires explicit human confirmation
+immediately before any DELIVER send.
 """
 
 from __future__ import annotations
@@ -22,6 +22,12 @@ from technoscout_cli import database_path, load_config
 KNOWN_REASONS = (
     "quality repair returned the candidate answer unchanged",
     "final quality adjudicator marked REVISED but again returned the candidate answer unchanged",
+    (
+        "The candidate answer does not provide a concrete failure mode and leading "
+        "indicator as requested. It only mentions memory fragmentation and an "
+        "out-of-memory (OOM) error as the failure mode, without specifying the exact "
+        "signal that shows up before it."
+    ),
 )
 
 
@@ -38,7 +44,7 @@ def resume_quality_block(con, cfg, job_id: str, *, room: str = "kibble") -> str:
     detail = str(tracked["detail"] or "")
     known = detail.startswith("quality:") and any(reason in detail for reason in KNOWN_REASONS)
     if not known:
-        print(f"STOP: block reason is not a known unchanged-quality condition: {detail}")
+        print(f"STOP: block reason is not a known resumable quality condition: {detail}")
         return "BLOCKED_OTHER_REASON"
 
     claim_state = _latest_status(
@@ -59,7 +65,7 @@ def resume_quality_block(con, cfg, job_id: str, *, room: str = "kibble") -> str:
         """
         UPDATE job_auto_orchestrator
         SET pipeline_state='WAITING_POSTCLAIM',
-            detail='human-invoked retry after unchanged-quality block',
+            detail='human-invoked retry after known quality block',
             updated_at=?
         WHERE room=? AND job_id=? AND content_hash=? AND pipeline_state='BLOCKED'
         """,
@@ -85,7 +91,7 @@ def resume_quality_block(con, cfg, job_id: str, *, room: str = "kibble") -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Resume one known unchanged-quality local block"
+        description="Resume one known resumable local quality block"
     )
     parser.add_argument("job_id")
     parser.add_argument("--room", default="kibble")
