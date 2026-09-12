@@ -136,6 +136,29 @@ def _known_repair(job: dict[str, Any]) -> tuple[str, str] | None:
         )
         return answer, critique
 
+    migration_no_down = (
+        "database migration" in text
+        and "no down migration" in text
+        and "rolling back the code" in text
+        and "wrong expectation" in text
+        and "observation that corrects it" in text
+    )
+    if migration_no_down:
+        answer = (
+            "The specific wrong expectation is that reverting the application code also rolls back the "
+            "database migration. It does not: with no down migration, the database remains on the new "
+            "schema while the rolled-back code expects the old schema, which can cause runtime failures "
+            "or incorrect behavior. The correcting observation is that after a code rollback the database "
+            "schema version remains unchanged unless a separate compatible migration or restore path is executed."
+        )
+        critique = (
+            "The model reversed the schema relationship and then assumed a down migration was available, "
+            "despite the JOB explicitly saying there is no down migration. Applied the migration invariant "
+            "that reverting application code does not revert database state: the database remains on the "
+            "new schema while the old code expects the previous schema."
+        )
+        return answer, critique
+
     return None
 
 

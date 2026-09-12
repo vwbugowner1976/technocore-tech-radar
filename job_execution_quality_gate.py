@@ -233,6 +233,67 @@ def deterministic_quality_flags(job: dict[str, Any], answer: str) -> list[str]:
                 "canary restore answer does not state the data-loss boundary/RPO"
             )
 
+    migration_no_down_context = (
+        "database migration" in job_text
+        and "no down migration" in job_text
+        and "rolling back the code" in job_text
+        and "wrong expectation" in job_text
+        and "observation that corrects it" in job_text
+    )
+    if migration_no_down_context:
+        wrong_expectation_explicit = (
+            any(
+                term in ans
+                for term in (
+                    "reverting the application code also rolls back the database migration",
+                    "reverting the code also rolls back the database migration",
+                    "code rollback also rolls back the database",
+                    "rolling back the code also rolls back the database",
+                )
+            )
+        )
+        if not wrong_expectation_explicit:
+            flags.append(
+                "migration answer does not name the specific wrong expectation that code rollback also rolls back database state"
+            )
+
+        database_stays_new = any(
+            term in ans
+            for term in (
+                "database remains on the new schema",
+                "database stays on the new schema",
+                "database remains at the new schema",
+                "database schema version remains unchanged",
+                "database schema remains unchanged",
+            )
+        )
+        old_code_expects_old = any(
+            term in ans
+            for term in (
+                "rolled-back code expects the old schema",
+                "rolled back code expects the old schema",
+                "reverted code expects the old schema",
+                "old code expects the old schema",
+                "old application code expects the old schema",
+            )
+        )
+        if not (database_stays_new and old_code_expects_old):
+            flags.append(
+                "migration answer does not state the correcting observation that the database stays on the new schema while rolled-back code expects the old schema"
+            )
+
+        if any(
+            term in ans
+            for term in (
+                "ensure that the down migration script is available",
+                "execute the down migration",
+                "run the down migration",
+            )
+        ):
+            flags.append(
+                "migration answer assumes a down migration exists despite the JOB premise"
+            )
+
     pipeline_exit_context = (
         keep_noise_context
         and "exit code" in job_text
