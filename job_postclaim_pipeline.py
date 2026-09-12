@@ -30,6 +30,7 @@ from job_execution_quality_gate import deterministic_quality_flags, quality_revi
 from job_execution_review import review_draft
 from job_execution_semantic_repair import repair_known_semantic_trap
 from job_local_evidence import load_exact_job_snapshot
+from job_quality_block_repair import repair_adjudicator_block
 from job_success_criterion_gate import persist_success_review, validate_success_criterion
 from technoscout.db import connect
 from technoscout.llm_backend import create_llm_backend
@@ -81,6 +82,7 @@ def run_postclaim_pipeline(
     draft_runner: Callable[..., dict[str, Any]] = generate_draft,
     review_runner: Callable[..., dict[str, Any]] = review_draft,
     quality_runner: Callable[..., dict[str, Any]] = quality_review,
+    quality_block_repair_runner: Callable[..., dict[str, Any]] = repair_adjudicator_block,
     success_runner: Callable[..., dict[str, Any]] = validate_success_criterion,
     success_persister: Callable[..., dict[str, Any]] = persist_success_review,
     semantic_repair_runner: Callable[..., dict[str, Any]] = repair_known_semantic_trap,
@@ -165,8 +167,49 @@ def run_postclaim_pipeline(
         exact_fetcher=cached_exact, claim_verifier=cached_claim,
     )
     stage_times["quality"] = time.monotonic() - t0
+
+    # The binary final adjudicator is deliberately verdict-only. If it finds a
+    # concrete material defect after the earlier reviewer and repairer both kept
+    # the same otherwise-unflagged answer, allow exactly one separate local writer
+    # to repair that concrete defect. This path is only reachable after the
+    # adjudicator actually ran, and the repaired answer still has to pass both the
+    # deterministic guard and the Generic Success Gate below.
+    quality_block_repair = None
     if quality.get("state") != "QUALITY_REVIEWED":
-        return {"state": "BLOCKED", "stage": "quality", "reason": quality.get("reason", "quality review failed"), "stage_times": stage_times}
+        if bool(quality.get("adjudication_attempted")) and bool(quality.get("repair_attempted")):
+            t0 = time.monotonic()
+            quality_block_repair = quality_block_repair_runner(
+                con,
+                cfg,
+                job_id,
+                room=room,
+                content_hash=str(claim["content_hash"]),
+                job=exact["job"],
+                defect=str(quality.get("reason", "quality adjudicator blocked the answer")),
+                llm=llm,
+                model=model,
+            )
+            stage_times["quality_adjudication_repair"] = time.monotonic() - t0
+            if quality_block_repair.get("state") == "QUALITY_REVIEWED":
+                quality = quality_block_repair
+            else:
+                return {
+                    "state": "BLOCKED",
+                    "stage": "quality-adjudication-repair",
+                    "reason": quality_block_repair.get(
+                        "reason", "one-shot adjudicator-guided quality repair failed"
+                    ),
+                    "quality": quality,
+                    "quality_block_repair": quality_block_repair,
+                    "stage_times": stage_times,
+                }
+        else:
+            return {
+                "state": "BLOCKED",
+                "stage": "quality",
+                "reason": quality.get("reason", "quality review failed"),
+                "stage_times": stage_times,
+            }
 
     t0 = time.monotonic()
     success = success_runner(
@@ -230,6 +273,7 @@ def run_postclaim_pipeline(
                 "success": success,
                 "grounding_repair": grounding_repair,
                 "semantic_fallback": semantic_fallback,
+                "quality_block_repair": quality_block_repair,
                 "stage_times": stage_times,
             }
 
@@ -286,6 +330,7 @@ def run_postclaim_pipeline(
                 "success": success,
                 "grounding_repair": grounding_repair,
                 "semantic_fallback": semantic_fallback,
+                "quality_block_repair": quality_block_repair,
                 "stage_times": stage_times,
             }
 
@@ -386,6 +431,7 @@ def run_postclaim_pipeline(
         "draft": draft,
         "review": review,
         "quality": quality,
+        "quality_block_repair": quality_block_repair,
         "success": success,
         "grounding_repair": grounding_repair,
         "semantic_fallback": semantic_fallback,
@@ -446,6 +492,8 @@ def main() -> None:
     print(f"quality={quality['decision']} confidence={quality['confidence']}")
     if quality.get("critique"):
         print(f"critique={quality['critique']}")
+    if result.get("quality_block_repair"):
+        print("quality_adjudication_repair=yes")
     success = result["success"]
     print(
         f"success={success.get('state','UNKNOWN')} "
