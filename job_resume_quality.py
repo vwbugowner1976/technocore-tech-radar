@@ -24,6 +24,7 @@ KNOWN_REASONS = (
     "final quality adjudicator marked REVISED but again returned the candidate answer unchanged",
     "adjudicator-guided repair returned the candidate answer unchanged",
     "adjudicator-guided repair already attempted: UNCHANGED",
+    "adjudicator-guided addition contains no new information",
     (
         "The candidate answer does not provide a concrete failure mode and leading "
         "indicator as requested. It only mentions memory fragmentation and an "
