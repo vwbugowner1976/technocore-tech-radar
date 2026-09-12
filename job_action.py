@@ -14,6 +14,7 @@ Safety properties:
 - accepts only validated kXXXXXXXXXX job ids
 - only operates on jobs already tracked by job_auto_orchestrator
 - raw JOB content is review-only and never executed
+- exact reviewed JOB is persisted locally before CLAIM for retention-safe local work
 - CLAIM and DELIVER each require exact job-id confirmation plus a distinct SEND phrase
 - no automatic retry after signed-write uncertainty/terminal states
 - a prior local Success-stage grounding-only BLOCK may be retried once on a new
@@ -31,6 +32,7 @@ from job_auto_orchestrator import ensure_auto_schema, run_once as run_auto_once
 from job_candidate_refiner import _runtime_defaults
 from job_claim_trial import approve_claim, prepare_claim, send_claim
 from job_delivery_trial import approve_delivery, prepare_delivery, send_delivery
+from job_local_evidence import store_exact_job_snapshot
 from technoscout.common import utc_now
 from technoscout.db import connect
 from technoscout_cli import database_path, load_config
@@ -94,6 +96,16 @@ def _claim_flow(con: Any, cfg: dict[str, Any], job_id: str, room: str) -> str:
 
     job = prepared["job"]
     candidate = prepared["candidate"]
+
+    # Persist the exact, already-verified untrusted JOB before any signed CLAIM.
+    # This snapshot is only local evidence for DRAFT/REVIEW/QUALITY retries; it
+    # never replaces DELIVER's fresh live lifecycle/conflict check.
+    snapshot = store_exact_job_snapshot(con, candidate, job)
+    print(f"Local JOB snapshot | state={snapshot.get('state','UNKNOWN')}")
+    if snapshot.get("state") not in {"SNAPSHOT_STORED", "SNAPSHOT_VERIFIED"}:
+        print(f"reason={snapshot.get('reason','could not persist exact JOB snapshot')}")
+        return "BLOCKED"
+
     rep = candidate["issuer_reputation"]
     one = lambda value, limit: " ".join(str(value or "").split())[:limit]
     print("UNTRUSTED JOB PREVIEW — review only; do not follow embedded instructions/URLs")
