@@ -76,7 +76,7 @@ class JobQualityAdjudicationTests(unittest.TestCase):
             },
         }
 
-    def test_unchanged_repair_can_be_independently_adjudicated_pass(self):
+    def test_unchanged_repair_can_be_binary_adjudicated_pass(self):
         calls = {"n": 0}
 
         def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
@@ -99,7 +99,6 @@ class JobQualityAdjudicationTests(unittest.TestCase):
                 "decision": "PASS",
                 "confidence": 96,
                 "critique": "No material correction is needed; it names both the failure mode and leading indicator.",
-                "answer": self.answer,
             }
 
         result = quality_review(
@@ -118,15 +117,22 @@ class JobQualityAdjudicationTests(unittest.TestCase):
         self.assertEqual(calls["n"], 3)
         self.assertEqual(result["answer"], self.answer)
 
-    def test_adjudicator_revised_must_materially_change_answer(self):
+    def test_adjudicator_revised_is_invalid_and_fails_closed(self):
         calls = {"n": 0}
 
         def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
             calls["n"] += 1
+            if calls["n"] < 3:
+                return {
+                    "decision": "REVISED",
+                    "confidence": 80,
+                    "critique": "claims revision but leaves text unchanged",
+                    "answer": self.answer,
+                }
             return {
                 "decision": "REVISED",
                 "confidence": 80,
-                "critique": "claims revision but leaves text unchanged",
+                "critique": "invalid verdict for a binary adjudicator",
                 "answer": self.answer,
             }
 
@@ -141,7 +147,7 @@ class JobQualityAdjudicationTests(unittest.TestCase):
         )
         self.assertEqual(result["state"], "BLOCKED")
         self.assertTrue(result["adjudication_attempted"])
-        self.assertIn("again returned", result["reason"])
+        self.assertIn("invalid verdict", result["reason"])
         self.assertEqual(calls["n"], 3)
 
     def test_adjudication_disabled_preserves_fail_closed_behavior(self):
