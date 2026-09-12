@@ -228,6 +228,36 @@ class JobAutoOrchestratorTests(unittest.TestCase):
         self.assertEqual(processed[0]["state"], "DELIVERY_READY")
         self.assertTrue(processed[0]["existing"])
 
+    def test_historical_sent_delivery_is_ignored(self):
+        self._insert_sent_claim()
+        ensure_delivery_schema(self.con)
+        self.con.execute(
+            """
+            INSERT INTO job_delivery_trials(
+              room,job_id,content_hash,claim_seq,claim_sender_did,
+              quality_reviewed_at,quality_decision,quality_confidence,
+              answer_hash,prepared_at,prepare_expires_at,approved_at,
+              permit_expires_at,consumed_at,sender_did,deliver_text_hash,
+              status,sent_seq,detail
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "kibble", self.job_id, self.digest, 150, "did:key:z6MkWorker",
+                self.now, "PASS", 95, "answerhash", 2.0, 3.0, 2.1,
+                3.1, 2.2, "did:key:z6MkWorker", "deliverhash",
+                "SENT", 200, "",
+            ),
+        )
+        self.con.commit()
+
+        processed = process_sent_claims(
+            self.con,
+            self.cfg,
+            pipeline_runner=lambda *a, **k: self.fail("historical delivered job must not rerun pipeline"),
+            llm_factory=lambda cfg: self.fail("LLM must not load for historical delivered job"),
+        )
+        self.assertEqual(processed, [])
+
 
 if __name__ == "__main__":
     unittest.main()
