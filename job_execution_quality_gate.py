@@ -138,7 +138,7 @@ def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
         confidence = 0
     critique = _clean(raw.get("critique", ""), 1200)
     answer = _clean(raw.get("answer", ""), 4000)
-    if decision in {"APPROVED", "REVISED"} and not answer:
+    if decision in {"PASS", "REVISED"} and not answer:
         decision = "BLOCKED"
         critique = critique or "quality reviewer returned no final answer"
     return {"decision": decision, "confidence": confidence, "critique": critique, "answer": answer}
