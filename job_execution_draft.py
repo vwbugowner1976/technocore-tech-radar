@@ -17,6 +17,7 @@ from typing import Any, Callable
 from job_candidate_refiner import _runtime_defaults, fetch_exact_job
 from job_claim_trial import ensure_claim_schema
 from job_live_revalidator import retained_export_messages
+from job_local_evidence import verify_local_claim_receipt
 from job_shadow import parse_kibble_message, sender_of
 from technoscout.common import local_llm_json, seq_of, utc_now
 from technoscout.db import connect
@@ -117,7 +118,7 @@ def claimed_trial(con: Any, job_id: str, room: str = "kibble") -> tuple[dict[str
     row = con.execute(
         """
         SELECT room,job_id,content_hash,job_seq,issuer_did,job_type,
-               sender_did,status,sent_seq,refined_relevance,refined_fit,
+               sender_did,status,sent_seq,claim_text_hash,refined_relevance,refined_fit,
                refined_confidence
         FROM job_claim_trials
         WHERE room=? AND job_id=?
@@ -142,6 +143,14 @@ def verify_claim_retained(
     *,
     export_fetcher: Callable[[dict[str, Any], str], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
+    """Verify retained CLAIM, with a signed HTTP-200 local receipt fallback.
+
+    The local receipt fallback is only used when the normal retained export no
+    longer contains the CLAIM. It never authorizes DELIVER readiness; the
+    delivery path still performs its own fresh live lifecycle/conflict check.
+    Injected export_fetchers remain deterministic for unit tests and therefore do
+    not trigger the local DB fallback.
+    """
     read = export_fetcher or retained_export_messages
     expected_seq = int(trial["sent_seq"])
     expected_did = str(trial["sender_did"])
@@ -154,8 +163,23 @@ def verify_claim_retained(
             return {"state": "CLAIM_MISMATCH"}
         if sender_of(msg) != expected_did:
             return {"state": "CLAIM_MISMATCH"}
-        return {"state": "CLAIM_CONFIRMED", "seq": expected_seq}
-    return {"state": "CLAIM_NOT_RETAINED"}
+        return {"state": "CLAIM_CONFIRMED", "seq": expected_seq, "source": "retained-export"}
+
+    if export_fetcher is not None:
+        return {"state": "CLAIM_NOT_RETAINED"}
+
+    local_con = connect(database_path(cfg))
+    try:
+        local = verify_local_claim_receipt(local_con, trial)
+    finally:
+        local_con.close()
+    if local.get("state") == "CLAIM_CONFIRMED":
+        return local
+    return {
+        "state": "CLAIM_NOT_RETAINED",
+        "local_receipt_state": local.get("state", "UNKNOWN"),
+        "local_receipt_reason": local.get("reason", ""),
+    }
 
 
 def generate_draft(
