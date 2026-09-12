@@ -204,6 +204,7 @@ def _sent_claim_rows(con: Any, room: str, limit: int) -> list[Any]:
         LEFT JOIN job_auto_orchestrator AS a
           ON a.room=c.room AND a.job_id=c.job_id AND a.content_hash=c.content_hash
         WHERE c.room=? AND c.status='SENT'
+          AND COALESCE(d.status,'') != 'SENT'
           AND COALESCE(a.pipeline_state,'') NOT IN ('DELIVERY_READY','BLOCKED','DELIVERED','DELIVERY_TERMINAL')
         ORDER BY c.prepared_at ASC
         LIMIT ?
