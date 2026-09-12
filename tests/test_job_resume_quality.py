@@ -46,11 +46,14 @@ class JobResumeQualityTests(unittest.TestCase):
     def tearDown(self):
         self.con.close()
 
-    def test_known_quality_block_rearms_only_local_pipeline(self):
+    def _assert_resumes(self):
         with patch("job_resume_quality.run_action", return_value="DELIVERY_READY") as action:
             state = resume_quality_block(self.con, {}, self.job_id)
         self.assertEqual(state, "DELIVERY_READY")
         action.assert_called_once_with(self.con, {}, self.job_id, room="kibble")
+
+    def test_known_quality_block_rearms_only_local_pipeline(self):
+        self._assert_resumes()
         row = self.con.execute(
             "SELECT pipeline_state,detail FROM job_auto_orchestrator WHERE job_id=?",
             (self.job_id,),
@@ -74,17 +77,12 @@ class JobResumeQualityTests(unittest.TestCase):
             (self.job_id,),
         )
         self.con.commit()
-        with patch("job_resume_quality.run_action", return_value="DELIVERY_READY") as action:
-            state = resume_quality_block(self.con, {}, self.job_id)
-        self.assertEqual(state, "DELIVERY_READY")
-        action.assert_called_once_with(self.con, {}, self.job_id, room="kibble")
+        self._assert_resumes()
 
     def test_concrete_gpu_adjudicator_reason_can_resume(self):
         self.con.execute(
             """
-            UPDATE job_auto_orchestrator
-            SET detail=?
-            WHERE job_id=?
+            UPDATE job_auto_orchestrator SET detail=? WHERE job_id=?
             """,
             (
                 "quality: The candidate answer does not provide a concrete failure mode and "
@@ -95,10 +93,19 @@ class JobResumeQualityTests(unittest.TestCase):
             ),
         )
         self.con.commit()
-        with patch("job_resume_quality.run_action", return_value="DELIVERY_READY") as action:
-            state = resume_quality_block(self.con, {}, self.job_id)
-        self.assertEqual(state, "DELIVERY_READY")
-        action.assert_called_once_with(self.con, {}, self.job_id, room="kibble")
+        self._assert_resumes()
+
+    def test_legacy_full_answer_repair_unchanged_can_resume_to_v2(self):
+        self.con.execute(
+            """
+            UPDATE job_auto_orchestrator
+            SET detail='quality: quality-adjudication-repair: adjudicator-guided repair returned the candidate answer unchanged'
+            WHERE job_id=?
+            """,
+            (self.job_id,),
+        )
+        self.con.commit()
+        self._assert_resumes()
 
     def test_other_block_reason_is_not_rearmed(self):
         self.con.execute(
