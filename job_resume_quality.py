@@ -22,6 +22,7 @@ from technoscout_cli import database_path, load_config
 KNOWN_REASONS = (
     "quality repair returned the candidate answer unchanged",
     "final quality adjudicator marked REVISED but again returned the candidate answer unchanged",
+    "adjudicator-guided repair returned the candidate answer unchanged",
     (
         "The candidate answer does not provide a concrete failure mode and leading "
         "indicator as requested. It only mentions memory fragmentation and an "
