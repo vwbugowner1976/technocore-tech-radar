@@ -8,7 +8,7 @@ active log file.
 Safety properties:
 - rotates only regular files directly below the configured log directory
 - never follows symlinks
-- compresses a snapshot before truncating the active file
+- compresses and installs an archive before truncating the active file
 - aborts rotation if the source grows or is replaced while the snapshot is made
 - preserves the active inode so long-running launchd processes keep logging
 - serializes concurrent rotators with a local flock
@@ -22,8 +22,6 @@ import fcntl
 import gzip
 import os
 from pathlib import Path
-import shutil
-import sys
 import tempfile
 from typing import Any
 
@@ -64,9 +62,8 @@ def rotate_file(path: Path, *, max_bytes: int, keep: int, dry_run: bool = False)
     """Rotate one log if it is large enough.
 
     The source is copied only up to the initial size. If inode/size changes
-    before truncation, the archive candidate is discarded and the active log is
-    left untouched. This intentionally prefers a delayed rotation over losing
-    newly appended bytes.
+    before truncation, the active log is left untouched. This intentionally
+    prefers a delayed rotation over losing newly appended bytes.
     """
     if not _eligible(path):
         return {"file": path.name, "state": "SKIPPED", "reason": "not eligible"}
@@ -85,6 +82,7 @@ def rotate_file(path: Path, *, max_bytes: int, keep: int, dry_run: bool = False)
     tmp_fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".gz.tmp", dir=str(path.parent))
     os.close(tmp_fd)
     tmp = Path(tmp_name)
+    installed_archive = False
 
     try:
         remaining = before.st_size
@@ -105,6 +103,16 @@ def rotate_file(path: Path, *, max_bytes: int, keep: int, dry_run: bool = False)
         if after_copy.st_ino != before.st_ino or after_copy.st_size != before.st_size:
             return {"file": path.name, "state": "DEFERRED", "reason": "source changed during snapshot"}
 
+        # Archive operations happen before touching the active log. If any of
+        # these fail, the active file remains completely intact.
+        _shift_archives(path, keep)
+        os.replace(tmp, _archive_path(path, 1))
+        installed_archive = True
+        tmp = Path()  # mark consumed
+
+        # Re-check immediately before truncate. If a writer appended in the
+        # meantime, keep the active log intact and simply retry later. The
+        # already-installed archive is then only a harmless duplicate snapshot.
         with path.open("r+b", buffering=0) as active:
             current = os.fstat(active.fileno())
             if current.st_ino != before.st_ino or current.st_size != before.st_size:
@@ -112,9 +120,6 @@ def rotate_file(path: Path, *, max_bytes: int, keep: int, dry_run: bool = False)
             active.truncate(0)
             os.fsync(active.fileno())
 
-        _shift_archives(path, keep)
-        os.replace(tmp, _archive_path(path, 1))
-        tmp = Path()  # mark consumed
         return {"file": path.name, "state": "ROTATED", "bytes": before.st_size}
     finally:
         if str(tmp) not in {"", "."}:
