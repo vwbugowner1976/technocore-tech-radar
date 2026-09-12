@@ -16,6 +16,8 @@ Safety properties:
 - raw JOB content is review-only and never executed
 - CLAIM and DELIVER each require exact job-id confirmation plus a distinct SEND phrase
 - no automatic retry after signed-write uncertainty/terminal states
+- a prior local Success-stage grounding-only BLOCK may be retried once on a new
+  human invocation; this retry contains no signed write
 - existing claim/delivery live revalidation and one-use permits remain authoritative
 """
 
@@ -29,6 +31,7 @@ from job_auto_orchestrator import ensure_auto_schema, run_once as run_auto_once
 from job_candidate_refiner import _runtime_defaults
 from job_claim_trial import approve_claim, prepare_claim, send_claim
 from job_delivery_trial import approve_delivery, prepare_delivery, send_delivery
+from technoscout.common import utc_now
 from technoscout.db import connect
 from technoscout_cli import database_path, load_config
 
@@ -148,6 +151,56 @@ def _run_local_pipeline(con: Any, cfg: dict[str, Any], job_id: str, room: str) -
     return target_state
 
 
+def _grounding_only_block(detail: str) -> bool:
+    text = str(detail or "")
+    return (
+        text.startswith("success:")
+        and "structured exact-quote evidence does not satisfy frozen contract" in text
+        and "requirements=[]" in text
+        and "grounding=[" in text
+    )
+
+
+def _retry_grounding_only_local_block(
+    con: Any,
+    cfg: dict[str, Any],
+    job_id: str,
+    room: str,
+    tracked: Any,
+) -> str:
+    """Re-arm only the local pipeline for a known grounding-only Success block.
+
+    This never changes CLAIM/DELIVER trial status and never performs a signed
+    write. The normal post-claim pipeline performs all retained-claim, exact-JOB,
+    Success, quality, and delivery-readiness checks again.
+    """
+    detail = str(tracked["detail"] or "")
+    if not _grounding_only_block(detail):
+        return "BLOCKED"
+
+    print("=== LOCAL SUCCESS RETRY ===")
+    print("R項目は合格済みでG groundingだけ未接続だったため、ローカル処理を1回だけ再検証します。")
+    print("CLAIM/DELIVERの送信はこの再試行では行いません。")
+
+    con.execute(
+        """
+        UPDATE job_auto_orchestrator
+        SET pipeline_state='WAITING_POSTCLAIM',
+            detail='human-invoked local retry after grounding-only Success block',
+            updated_at=?
+        WHERE room=? AND job_id=? AND content_hash=? AND pipeline_state='BLOCKED'
+        """,
+        (
+            utc_now(),
+            str(tracked["room"]),
+            str(tracked["job_id"]),
+            str(tracked["content_hash"]),
+        ),
+    )
+    con.commit()
+    return _run_local_pipeline(con, cfg, job_id, room)
+
+
 def _delivery_flow(con: Any, cfg: dict[str, Any], job_id: str, room: str) -> str:
     print("=== DELIVERY REVIEW ===")
     prepared = prepare_delivery(con, cfg, job_id, room=room)
@@ -201,7 +254,16 @@ def run_action(con: Any, cfg: dict[str, Any], job_id: str, *, room: str = "kibbl
     if delivery_state in {"UNCERTAIN", "RESERVED"}:
         print(f"STOP: delivery is terminal state {delivery_state}; do not retry automatically")
         return delivery_state
+    if claim_state in {"UNCERTAIN", "RESERVED"}:
+        print(f"STOP: claim is terminal state {claim_state}; do not retry automatically")
+        return claim_state
+
     if pipeline_state == "BLOCKED":
+        retried = _retry_grounding_only_local_block(con, cfg, job_id, room, tracked)
+        if retried == "DELIVERY_READY":
+            return _delivery_flow(con, cfg, job_id, room)
+        if retried != "BLOCKED":
+            return retried
         print(f"STOP: pipeline is BLOCKED: {tracked['detail']}")
         return "BLOCKED"
 
