@@ -52,20 +52,20 @@ class JobQualityBlockRepairTests(unittest.TestCase):
     def tearDown(self):
         self.con.close()
 
-    def test_concrete_adjudicator_defect_gets_one_material_repair(self):
-        repaired_answer = (
-            "Failure mode: GPU allocator fragmentation causes an out-of-memory allocation "
-            "failure for the smaller inference job. Leading indicator: allocation retries or "
-            "failed large allocations rise while nominal free GPU memory still remains."
+    def test_concrete_defect_gets_one_additive_repair(self):
+        addition = (
+            "Leading indicator: allocation retries or failed large allocations rise "
+            "while nominal free GPU memory still remains."
         )
 
         def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
             self.assertIn("leading indicator", payload["adjudicator_defect"].lower())
+            self.assertEqual(payload["candidate_answer"], self.candidate)
             return {
-                "decision": "REVISED",
+                "decision": "ADD",
                 "confidence": 94,
                 "critique": "added an explicit leading indicator",
-                "answer": repaired_answer,
+                "addition": addition,
             }
 
         result = repair_adjudicator_block(
@@ -74,31 +74,30 @@ class JobQualityBlockRepairTests(unittest.TestCase):
             self.job_id,
             content_hash=self.digest,
             job=self.job,
-            defect=(
-                "The candidate answer does not provide a concrete failure mode and leading "
-                "indicator as requested."
-            ),
+            defect="The candidate answer is missing the requested leading indicator.",
             model="fake-model",
             evaluator=evaluator,
         )
         self.assertEqual(result["state"], "QUALITY_REVIEWED")
         self.assertEqual(result["decision"], "REVISED")
-        self.assertNotEqual(result["answer"], self.candidate)
+        self.assertEqual(result["repair_strategy"], "additive-v2")
+        self.assertIn(self.candidate, result["answer"])
+        self.assertIn("Leading indicator:", result["answer"])
         row = self.con.execute(
             "SELECT decision,answer_text,status FROM job_execution_quality_reviews WHERE job_id=?",
             (self.job_id,),
         ).fetchone()
         self.assertEqual(row["decision"], "REVISED")
         self.assertEqual(row["status"], "QUALITY_REVIEWED")
-        self.assertIn("Leading indicator", row["answer_text"])
+        self.assertIn("Leading indicator:", row["answer_text"])
 
-    def test_same_job_cannot_use_adjudicator_repair_twice(self):
+    def test_same_job_cannot_use_additive_repair_twice(self):
         def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
             return {
-                "decision": "REVISED",
+                "decision": "ADD",
                 "confidence": 90,
                 "critique": "fixed",
-                "answer": self.candidate + " Leading indicator: allocator retries rise.",
+                "addition": "Leading indicator: allocator retries rise before allocation failure.",
             }
 
         first = repair_adjudicator_block(
@@ -125,7 +124,7 @@ class JobQualityBlockRepairTests(unittest.TestCase):
         self.assertEqual(second["state"], "BLOCKED")
         self.assertIn("already attempted", second["reason"])
 
-    def test_unchanged_targeted_repair_fails_closed(self):
+    def test_duplicate_addition_fails_closed(self):
         result = repair_adjudicator_block(
             self.con,
             {"research_model": "fake-model"},
@@ -135,14 +134,44 @@ class JobQualityBlockRepairTests(unittest.TestCase):
             defect="missing leading indicator",
             model="fake-model",
             evaluator=lambda *a, **k: {
-                "decision": "REVISED",
+                "decision": "ADD",
                 "confidence": 80,
-                "critique": "claims a repair",
-                "answer": self.candidate,
+                "critique": "claims an addition",
+                "addition": self.candidate,
             },
         )
         self.assertEqual(result["state"], "BLOCKED")
-        self.assertIn("unchanged", result["reason"])
+        self.assertIn("no new information", result["reason"])
+
+    def test_legacy_v1_attempt_does_not_block_one_v2_attempt(self):
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.con.execute(
+            """
+            INSERT INTO job_quality_block_repairs(
+              room,job_id,content_hash,attempted_at,defect_hash,status,
+              confidence,critique,answer_hash
+            ) VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            ("kibble", self.job_id, self.digest, now, "old", "UNCHANGED", 80, "old v1", ""),
+        )
+        self.con.commit()
+
+        result = repair_adjudicator_block(
+            self.con,
+            {"research_model": "fake-model"},
+            self.job_id,
+            content_hash=self.digest,
+            job=self.job,
+            defect="missing leading indicator",
+            model="fake-model",
+            evaluator=lambda *a, **k: {
+                "decision": "ADD",
+                "confidence": 92,
+                "critique": "adds missing signal",
+                "addition": "Leading indicator: the allocator begins retrying or failing larger allocations before the final OOM.",
+            },
+        )
+        self.assertEqual(result["state"], "QUALITY_REVIEWED")
 
 
 if __name__ == "__main__":
