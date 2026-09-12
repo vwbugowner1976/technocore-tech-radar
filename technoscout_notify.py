@@ -66,7 +66,7 @@ def _publish_ntfy(
         return {"state": "PUBLISHED_LOCAL", "detail": message[:200]}
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
         return {"state": "FAILED", "detail": f"{type(exc).__name__}: {exc}"[:300]}
-    except Exception as exc:  # notifier must never crash the watcher
+    except Exception as exc:
         return {"state": "FAILED", "detail": f"{type(exc).__name__}: {exc}"[:300]}
 
 
@@ -96,11 +96,11 @@ def _human_action_notice(
 
 
 def _action_shell_message(kind: str, job_id: str) -> str:
-    return (
-        f"# {kind} job={job_id}\n"
-        "# この通知を丸ごとMac Terminalへ貼り付け\n"
-        f'cd "$HOME/technocore-tech-radar"; .venv/bin/python job_action.py {job_id}'
-    )
+    # Keep the body to exactly one shell command. Interactive zsh does not enable
+    # INTERACTIVE_COMMENTS by default, so leading '# ...' explanation lines can
+    # become `command not found: #` when the whole notification is pasted.
+    # The ntfy tag/title conveys the action kind; only validated job_id is variable.
+    return f'cd "$HOME/technocore-tech-radar"; .venv/bin/python job_action.py {job_id}'
 
 
 def notify_ready_candidate(
