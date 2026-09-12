@@ -81,9 +81,7 @@ class JobResumeQualityTests(unittest.TestCase):
 
     def test_concrete_gpu_adjudicator_reason_can_resume(self):
         self.con.execute(
-            """
-            UPDATE job_auto_orchestrator SET detail=? WHERE job_id=?
-            """,
+            "UPDATE job_auto_orchestrator SET detail=? WHERE job_id=?",
             (
                 "quality: The candidate answer does not provide a concrete failure mode and "
                 "leading indicator as requested. It only mentions memory fragmentation and an "
@@ -95,7 +93,7 @@ class JobResumeQualityTests(unittest.TestCase):
         self.con.commit()
         self._assert_resumes()
 
-    def test_legacy_full_answer_repair_unchanged_can_resume_to_v2(self):
+    def test_legacy_full_answer_repair_unchanged_can_resume(self):
         self.con.execute(
             """
             UPDATE job_auto_orchestrator
@@ -107,11 +105,23 @@ class JobResumeQualityTests(unittest.TestCase):
         self.con.commit()
         self._assert_resumes()
 
-    def test_legacy_repair_ledger_unchanged_can_resume_to_v2(self):
+    def test_legacy_repair_ledger_unchanged_can_resume(self):
         self.con.execute(
             """
             UPDATE job_auto_orchestrator
             SET detail='quality-adjudication-repair: adjudicator-guided repair already attempted: UNCHANGED'
+            WHERE job_id=?
+            """,
+            (self.job_id,),
+        )
+        self.con.commit()
+        self._assert_resumes()
+
+    def test_additive_v2_duplicate_can_resume_to_v3(self):
+        self.con.execute(
+            """
+            UPDATE job_auto_orchestrator
+            SET detail='quality-adjudication-repair: adjudicator-guided addition contains no new information'
             WHERE job_id=?
             """,
             (self.job_id,),
