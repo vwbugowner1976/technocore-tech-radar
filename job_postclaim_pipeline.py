@@ -44,6 +44,27 @@ def _candidate_from_claim(claim: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_grounding_only_success_block(result: dict[str, Any]) -> bool:
+    """Allow one local repair only when every explicit Success requirement passed.
+
+    This does not weaken the frozen contract. The retry enables the existing local
+    repair writer only when the structured verifier says there are no missing R
+    requirements and at least one required G grounding fact is still missing. The
+    repaired answer must then pass the exact same final Success verifier.
+    """
+    if result.get("state") != "BLOCKED":
+        return False
+    verdict = result.get("verdict") or {}
+    missing_requirements = verdict.get("missing_requirements")
+    missing_grounding = verdict.get("missing_grounding")
+    return (
+        isinstance(missing_requirements, list)
+        and len(missing_requirements) == 0
+        and isinstance(missing_grounding, list)
+        and len(missing_grounding) > 0
+    )
+
+
 def run_postclaim_pipeline(
     con: Any,
     cfg: dict[str, Any],
@@ -132,6 +153,27 @@ def run_postclaim_pipeline(
     )
     stage_times["success"] = time.monotonic() - t0
 
+    # Generic LLM repair remains disabled by default. The only automatic exception
+    # is a grounding-only failure: every explicit R requirement already passed,
+    # but a required G fact was not explicitly linked. In that narrow case enable
+    # exactly one existing local repair attempt, then rely on the same frozen final
+    # verifier. No signed write exists in this path.
+    grounding_repair = None
+    if _is_grounding_only_success_block(success):
+        repair_cfg = dict(cfg)
+        repair_cfg["job_success_repair_attempts"] = 1
+        t0 = time.monotonic()
+        grounding_repair = success_runner(
+            repair_cfg,
+            llm,
+            str(model or ""),
+            exact["job"],
+            str(quality.get("answer", "")),
+        )
+        stage_times["success_grounding_repair"] = time.monotonic() - t0
+        if grounding_repair.get("state") == "SUCCESS_REVIEWED":
+            success = grounding_repair
+
     semantic_fallback = None
 
     if success.get("state") == "BLOCKED":
@@ -161,6 +203,7 @@ def run_postclaim_pipeline(
                     f"{semantic_fallback.get('reason', 'unknown')}"
                 ),
                 "success": success,
+                "grounding_repair": grounding_repair,
                 "semantic_fallback": semantic_fallback,
                 "stage_times": stage_times,
             }
@@ -216,6 +259,7 @@ def run_postclaim_pipeline(
                     f"{success.get('reason', success.get('state', 'UNKNOWN'))}"
                 ),
                 "success": success,
+                "grounding_repair": grounding_repair,
                 "semantic_fallback": semantic_fallback,
                 "stage_times": stage_times,
             }
@@ -316,6 +360,7 @@ def run_postclaim_pipeline(
         "review": review,
         "quality": quality,
         "success": success,
+        "grounding_repair": grounding_repair,
         "semantic_fallback": semantic_fallback,
         "prepared": prepared,
         "stage_times": stage_times,
