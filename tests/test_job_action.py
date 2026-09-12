@@ -63,6 +63,32 @@ class JobActionTests(unittest.TestCase):
         claim.assert_not_called()
         delivery.assert_not_called()
 
+    def test_grounding_only_success_block_retries_local_pipeline_then_delivery(self):
+        detail = (
+            "success: generic Success gate blocked: structured exact-quote evidence "
+            "does not satisfy frozen contract; requirements=[] grounding=['G1']; "
+            "semantic fallback unavailable: JOB does not match a supported deterministic semantic repair"
+        )
+        tracked = {
+            "pipeline_state": "BLOCKED",
+            "detail": detail,
+            "room": "kibble",
+            "job_id": JOB,
+            "content_hash": "digest",
+        }
+        with (
+            patch("job_action._latest_auto", return_value=tracked),
+            patch("job_action._latest_status", side_effect=["SENT", ""]),
+            patch("job_action._retry_grounding_only_local_block", return_value="DELIVERY_READY") as retry,
+            patch("job_action._claim_flow") as claim,
+            patch("job_action._delivery_flow", return_value="SENT") as delivery,
+        ):
+            state = job_action.run_action(None, {}, JOB)
+        self.assertEqual(state, "SENT")
+        retry.assert_called_once()
+        claim.assert_not_called()
+        delivery.assert_called_once()
+
     def test_confirmation_requires_job_id_and_distinct_send_phrase(self):
         with patch("builtins.input", side_effect=[JOB, "SEND CLAIM"]):
             self.assertTrue(job_action._confirm("CLAIM", JOB, "SEND CLAIM"))
