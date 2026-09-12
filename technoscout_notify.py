@@ -6,9 +6,10 @@ Technocore, execute job content, or include raw JOB title/body. The ntfy target 
 configured privately (technoscout.config.json) so endpoint details are not stored
 in the repository.
 
-CLAIM_READY and DELIVERY_READY notifications contain a copy/paste-safe shell
-snippet built only from a validated job id and fixed local commands. The snippet
-still requires explicit human confirmation immediately before each signed send.
+CLAIM_READY and DELIVERY_READY notifications contain one copy/paste-safe local
+command built only from a validated job id. That command enters job_action.py,
+which still requires explicit human confirmation immediately before each signed
+CLAIM or DELIVER send.
 """
 
 from __future__ import annotations
@@ -94,49 +95,11 @@ def _human_action_notice(
     )
 
 
-def _claim_shell_message(job_id: str) -> str:
-    command = (
-        'cd "$HOME/technocore-tech-radar"; '
-        f'.venv/bin/python job_claim_trial.py prepare {job_id}; '
-        f"printf 'CLAIMを承認するなら {job_id} を入力: '; "
-        'IFS= read -r TS_JOB </dev/tty; '
-        f'if [ "$TS_JOB" = "{job_id}" ]; then '
-        f'.venv/bin/python job_claim_trial.py approve {job_id}; '
-        "printf 'CLAIMを送信するなら SEND と入力: '; "
-        'IFS= read -r TS_SEND </dev/tty; '
-        'if [ "$TS_SEND" = "SEND" ]; then '
-        f'.venv/bin/python job_claim_trial.py send {job_id}; '
-        "else echo 'CLAIMは送信しませんでした'; fi; "
-        "else echo 'CLAIMは承認しませんでした'; fi; "
-        'unset TS_JOB TS_SEND'
-    )
+def _action_shell_message(kind: str, job_id: str) -> str:
     return (
-        f"# CLAIM_READY job={job_id}\n"
+        f"# {kind} job={job_id}\n"
         "# この通知を丸ごとMac Terminalへ貼り付け\n"
-        + command
-    )
-
-
-def _delivery_shell_message(job_id: str) -> str:
-    command = (
-        'cd "$HOME/technocore-tech-radar"; '
-        f'.venv/bin/python job_delivery_trial.py prepare {job_id}; '
-        f"printf 'DELIVERを承認するなら {job_id} を入力: '; "
-        'IFS= read -r TS_JOB </dev/tty; '
-        f'if [ "$TS_JOB" = "{job_id}" ]; then '
-        f'.venv/bin/python job_delivery_trial.py approve {job_id}; '
-        "printf 'DELIVERを送信するなら SEND と入力: '; "
-        'IFS= read -r TS_SEND </dev/tty; '
-        'if [ "$TS_SEND" = "SEND" ]; then '
-        f'.venv/bin/python job_delivery_trial.py send {job_id}; '
-        "else echo 'DELIVERは送信しませんでした'; fi; "
-        "else echo 'DELIVERは承認しませんでした'; fi; "
-        'unset TS_JOB TS_SEND'
-    )
-    return (
-        f"# DELIVERY_READY job={job_id}\n"
-        "# この通知を丸ごとMac Terminalへ貼り付け\n"
-        + command
+        f'cd "$HOME/technocore-tech-radar"; .venv/bin/python job_action.py {job_id}'
     )
 
 
@@ -162,11 +125,11 @@ def notify_claim_ready(
     *,
     opener: Callable[..., Any] | None = None,
 ) -> dict[str, str]:
-    """Publish a copy/paste-safe interactive CLAIM workflow for Mac Terminal."""
+    """Publish one local entry command for the unified human action workflow."""
     return _human_action_notice(
         cfg,
         job_id,
-        message=_claim_shell_message(job_id),
+        message=_action_shell_message("CLAIM_READY", job_id),
         tag="hand",
         opener=opener,
     )
@@ -178,11 +141,11 @@ def notify_delivery_ready(
     *,
     opener: Callable[..., Any] | None = None,
 ) -> dict[str, str]:
-    """Publish a copy/paste-safe interactive DELIVER workflow for Mac Terminal."""
+    """Publish the same local entry command; job_action detects DELIVERY_READY."""
     return _human_action_notice(
         cfg,
         job_id,
-        message=_delivery_shell_message(job_id),
+        message=_action_shell_message("DELIVERY_READY", job_id),
         tag="outbox_tray",
         opener=opener,
     )
