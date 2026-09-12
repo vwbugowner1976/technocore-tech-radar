@@ -52,23 +52,8 @@ class JobQualityBlockRepairTests(unittest.TestCase):
     def tearDown(self):
         self.con.close()
 
-    def test_concrete_defect_gets_one_additive_repair(self):
-        addition = (
-            "Leading indicator: allocation retries or failed large allocations rise "
-            "while nominal free GPU memory still remains."
-        )
-
-        def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
-            self.assertIn("leading indicator", payload["adjudicator_defect"].lower())
-            self.assertEqual(payload["candidate_answer"], self.candidate)
-            return {
-                "decision": "ADD",
-                "confidence": 94,
-                "critique": "added an explicit leading indicator",
-                "addition": addition,
-            }
-
-        result = repair_adjudicator_block(
+    def _run(self, evaluator):
+        return repair_adjudicator_block(
             self.con,
             {"research_model": "fake-model"},
             self.job_id,
@@ -78,98 +63,135 @@ class JobQualityBlockRepairTests(unittest.TestCase):
             model="fake-model",
             evaluator=evaluator,
         )
+
+    def test_novel_first_addition_repairs_in_one_micro_attempt(self):
+        addition = (
+            "Leading indicator: allocation retries or failed large allocations rise "
+            "while nominal free GPU memory still remains."
+        )
+
+        def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
+            self.assertIn("leading indicator", payload["adjudicator_defect"].lower())
+            return {
+                "decision": "ADD",
+                "confidence": 94,
+                "critique": "added an explicit leading indicator",
+                "addition": addition,
+            }
+
+        result = self._run(evaluator)
         self.assertEqual(result["state"], "QUALITY_REVIEWED")
-        self.assertEqual(result["decision"], "REVISED")
-        self.assertEqual(result["repair_strategy"], "additive-v2")
-        self.assertIn(self.candidate, result["answer"])
+        self.assertEqual(result["repair_strategy"], "additive-v3-two-pass")
+        self.assertEqual(result["repair_micro_attempts"], 1)
         self.assertIn("Leading indicator:", result["answer"])
+
+    def test_duplicate_first_addition_gets_one_final_constrained_retry(self):
+        calls = {"n": 0}
+
+        def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {
+                    "decision": "ADD",
+                    "confidence": 80,
+                    "critique": "first attempt repeats the answer",
+                    "addition": self.candidate,
+                }
+            self.assertIn("rejected_duplicate_addition", payload)
+            self.assertIn("forbidden_content", payload)
+            return {
+                "decision": "ADD",
+                "confidence": 93,
+                "critique": "adds a genuinely observable pre-failure signal",
+                "addition": (
+                    "Leading indicator: allocator retries or large-allocation failures "
+                    "begin rising before the final OOM."
+                ),
+            }
+
+        result = self._run(evaluator)
+        self.assertEqual(result["state"], "QUALITY_REVIEWED")
+        self.assertEqual(result["repair_micro_attempts"], 2)
+        self.assertEqual(calls["n"], 2)
+        self.assertIn("allocator retries", result["answer"])
+
+    def test_duplicate_both_micro_attempts_fail_closed(self):
+        calls = {"n": 0}
+
+        def evaluator(*args, **kwargs):
+            calls["n"] += 1
+            return {
+                "decision": "ADD",
+                "confidence": 70,
+                "critique": "still repeats candidate",
+                "addition": self.candidate,
+            }
+
+        result = self._run(evaluator)
+        self.assertEqual(result["state"], "BLOCKED")
+        self.assertIn("no new information", result["reason"])
+        self.assertEqual(calls["n"], 2)
         row = self.con.execute(
-            "SELECT decision,answer_text,status FROM job_execution_quality_reviews WHERE job_id=?",
+            "SELECT status,micro_attempts FROM job_quality_patch_repairs_v3 WHERE job_id=?",
             (self.job_id,),
         ).fetchone()
-        self.assertEqual(row["decision"], "REVISED")
-        self.assertEqual(row["status"], "QUALITY_REVIEWED")
-        self.assertIn("Leading indicator:", row["answer_text"])
+        self.assertEqual(row["status"], "NO_NEW_INFORMATION")
+        self.assertEqual(row["micro_attempts"], 2)
 
-    def test_same_job_cannot_use_additive_repair_twice(self):
-        def evaluator(cfg, llm, model, prompt, payload, max_tokens, timeout_seconds):
-            return {
+    def test_same_job_cannot_use_v3_twice(self):
+        first = self._run(
+            lambda *a, **k: {
                 "decision": "ADD",
                 "confidence": 90,
                 "critique": "fixed",
-                "addition": "Leading indicator: allocator retries rise before allocation failure.",
+                "addition": "Leading indicator: allocator retry counters rise before OOM.",
             }
-
-        first = repair_adjudicator_block(
-            self.con,
-            {"research_model": "fake-model"},
-            self.job_id,
-            content_hash=self.digest,
-            job=self.job,
-            defect="missing leading indicator",
-            model="fake-model",
-            evaluator=evaluator,
         )
         self.assertEqual(first["state"], "QUALITY_REVIEWED")
-        second = repair_adjudicator_block(
-            self.con,
-            {"research_model": "fake-model"},
-            self.job_id,
-            content_hash=self.digest,
-            job=self.job,
-            defect="missing leading indicator",
-            model="fake-model",
-            evaluator=lambda *a, **k: self.fail("second evaluator call is forbidden"),
-        )
+        second = self._run(lambda *a, **k: self.fail("second evaluator call is forbidden"))
         self.assertEqual(second["state"], "BLOCKED")
         self.assertIn("already attempted", second["reason"])
 
-    def test_duplicate_addition_fails_closed(self):
-        result = repair_adjudicator_block(
-            self.con,
-            {"research_model": "fake-model"},
-            self.job_id,
-            content_hash=self.digest,
-            job=self.job,
-            defect="missing leading indicator",
-            model="fake-model",
-            evaluator=lambda *a, **k: {
-                "decision": "ADD",
-                "confidence": 80,
-                "critique": "claims an addition",
-                "addition": self.candidate,
-            },
+    def test_existing_v2_ledger_does_not_block_v3(self):
+        self.con.execute(
+            """
+            CREATE TABLE job_quality_patch_repairs (
+              room TEXT NOT NULL,
+              job_id TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              attempted_at TEXT NOT NULL,
+              defect_hash TEXT NOT NULL,
+              status TEXT NOT NULL,
+              confidence INTEGER NOT NULL DEFAULT 0,
+              critique TEXT NOT NULL DEFAULT '',
+              addition_hash TEXT NOT NULL DEFAULT '',
+              answer_hash TEXT NOT NULL DEFAULT '',
+              PRIMARY KEY(room, job_id, content_hash)
+            )
+            """
         )
-        self.assertEqual(result["state"], "BLOCKED")
-        self.assertIn("no new information", result["reason"])
-
-    def test_legacy_v1_attempt_does_not_block_one_v2_attempt(self):
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.con.execute(
             """
-            INSERT INTO job_quality_block_repairs(
+            INSERT INTO job_quality_patch_repairs(
               room,job_id,content_hash,attempted_at,defect_hash,status,
-              confidence,critique,answer_hash
-            ) VALUES(?,?,?,?,?,?,?,?,?)
+              confidence,critique,addition_hash,answer_hash
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
             """,
-            ("kibble", self.job_id, self.digest, now, "old", "UNCHANGED", 80, "old v1", ""),
+            (
+                "kibble", self.job_id, self.digest, now, "old-v2", "NO_NEW_INFORMATION",
+                80, "old v2 duplicate", "hash", "",
+            ),
         )
         self.con.commit()
 
-        result = repair_adjudicator_block(
-            self.con,
-            {"research_model": "fake-model"},
-            self.job_id,
-            content_hash=self.digest,
-            job=self.job,
-            defect="missing leading indicator",
-            model="fake-model",
-            evaluator=lambda *a, **k: {
+        result = self._run(
+            lambda *a, **k: {
                 "decision": "ADD",
                 "confidence": 92,
-                "critique": "adds missing signal",
-                "addition": "Leading indicator: the allocator begins retrying or failing larger allocations before the final OOM.",
-            },
+                "critique": "new v3 signal",
+                "addition": "Leading indicator: failed large-allocation attempts rise before OOM.",
+            }
         )
         self.assertEqual(result["state"], "QUALITY_REVIEWED")
 
