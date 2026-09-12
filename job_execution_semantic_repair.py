@@ -108,6 +108,34 @@ def _known_repair(job: dict[str, Any]) -> tuple[str, str] | None:
         )
         return answer, critique
 
+    canary_restore = (
+        "canary deploy" in text
+        and "backup" in text
+        and "restore" in text
+        and "checks only error rate" in text
+        and "latency doubles" in text
+        and "recovery time target" in text
+        and "data-loss boundary" in text
+        and "backup artifact" in text
+        and "one assumption" in text
+    )
+    if canary_restore:
+        answer = (
+            "The drill must prove that a known-good database snapshot can be restored and the service "
+            "returned to usable operation within the declared recovery time target (RTO), with recovered "
+            "data no older than the declared data-loss boundary (RPO). One backup artifact worth restoring "
+            "periodically is a database snapshot. One assumption the drill exposes is that a zero error "
+            "rate means the canary is healthy; latency can double with no failed requests, so error rate "
+            "alone is not a sufficient health signal."
+        )
+        critique = (
+            "The model described the required categories without naming the concrete backup artifact or "
+            "the assumption required by Success. Applied the canary-restore invariant that a restore drill "
+            "must demonstrate RTO/RPO recovery from a concrete backup artifact and expose that error rate "
+            "alone can miss severe latency degradation."
+        )
+        return answer, critique
+
     return None
 
 

@@ -186,6 +186,53 @@ def deterministic_quality_flags(job: dict[str, Any], answer: str) -> list[str]:
         if not (keep_explicit and noise_explicit):
             flags.append("answer does not explicitly identify one field to keep and one field that is noise")
 
+    canary_restore_context = (
+        "canary deploy" in job_text
+        and "backup artifact" in job_text
+        and "one assumption" in job_text
+        and "recovery time target" in job_text
+        and "data-loss boundary" in job_text
+        and "latency doubles" in job_text
+        and "error rate" in job_text
+    )
+    if canary_restore_context:
+        if not any(
+            term in ans
+            for term in (
+                "database snapshot",
+                "database dump",
+                "volume snapshot",
+                "backup snapshot",
+            )
+        ):
+            flags.append(
+                "canary restore answer does not name one concrete backup artifact"
+            )
+
+        exposes_health_assumption = (
+            "assumption" in ans
+            and "error rate" in ans
+            and "latency" in ans
+            and any(term in ans for term in ("healthy", "health signal", "health"))
+        )
+        if not exposes_health_assumption:
+            flags.append(
+                "canary restore answer does not identify the error-rate-only health assumption exposed by the drill"
+            )
+
+        if not any(term in ans for term in ("recovery time target", "rto")):
+            flags.append(
+                "canary restore answer does not state the recovery time target/RTO"
+            )
+
+        if not any(
+            term in ans
+            for term in ("data-loss boundary", "data loss boundary", "rpo")
+        ):
+            flags.append(
+                "canary restore answer does not state the data-loss boundary/RPO"
+            )
+
     pipeline_exit_context = (
         keep_noise_context
         and "exit code" in job_text
