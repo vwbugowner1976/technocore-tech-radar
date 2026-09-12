@@ -86,6 +86,28 @@ def _known_repair(job: dict[str, Any]) -> tuple[str, str] | None:
         )
         return answer, critique
 
+    pod_readiness = (
+        "pod" in text
+        and "readiness probe" in text
+        and "traffic arrives before the application has finished starting" in text
+        and "noise" in text
+        and any(term in text for term in ("worth keeping", "worth recording", "field worth keeping"))
+    )
+    if pod_readiness:
+        answer = (
+            "Keep an app_ready_at field: the timestamp of an application-level startup-complete/ready event "
+            "that means the process can actually serve traffic. Noise is the pod/container Running or start "
+            "timestamp by itself, because runtime state can precede application readiness when no readiness "
+            "probe gates traffic."
+        )
+        critique = (
+            "The model did not satisfy the explicit keep-versus-noise criterion. Applied the readiness invariant "
+            "that pod/container Running state is not equivalent to application readiness when traffic is not "
+            "gated by a readiness probe; an application-level ready/startup-complete timestamp preserves the "
+            "causal timing needed to explain early traffic failures."
+        )
+        return answer, critique
+
     return None
 
 
