@@ -19,7 +19,7 @@ from typing import Any, Callable
 from job_candidate_refiner import _runtime_defaults
 from job_claim_trial import ensure_claim_schema, prepare_claim
 from job_delivery_trial import ensure_delivery_schema
-from job_postclaim_pipeline import run_postclaim_pipeline
+from job_postclaim_pipeline_live import run_postclaim_pipeline
 from technoscout.common import utc_now
 from technoscout.db import connect
 from technoscout.llm_backend import create_llm_backend
