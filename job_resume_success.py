@@ -6,11 +6,12 @@ posts, or changes CLAIM/DELIVER trial status. For one (room, job_id,
 content_hash), it may re-arm the local post-claim pipeline once and enable the
 existing frozen-contract Success repairer for that invocation.
 
-Version 2 also routes this human retry through the narrow literal named-item
-proof supplement. That supplement can only add an exact sentence ID when a
-short frozen requirement such as "one leading indicator" is literally expressed
-as "the leading indicator is ..." in the answer. Grounding checks remain
-untouched. The final frozen Success verifier remains fail-closed.
+Version 3 keeps the narrow literal named-item proof supplement from V2 and also
+routes semantic fallback through a narrowly recognized shared-GPU repair. The
+GPU repair is only eligible when the JOB itself states the shared
+training/inference setup, memory fragmentation, the smaller-job failure, and the
+failure-mode/leading-indicator success shape. Grounding and the final frozen
+Success verifier remain fail-closed.
 
 If the pipeline reaches DELIVERY_READY, use the normal human action command
 separately to review the exact delivery preview.
@@ -24,6 +25,7 @@ from typing import Any
 
 from job_auto_orchestrator import ensure_auto_schema, process_sent_claims
 from job_candidate_refiner import _runtime_defaults
+from job_gpu_semantic_repair import repair_gpu_shared_or_known
 from job_postclaim_pipeline import run_postclaim_pipeline
 from job_success_named_proof import validate_success_criterion as validate_success_named
 from technoscout.common import utc_now
@@ -33,10 +35,11 @@ from technoscout_cli import database_path, load_config
 
 _JOB_ID_RE = re.compile(r"^k[0-9a-f]{10}$")
 
-# V2 intentionally uses a new ledger. A prior V1 retry that ran before the
-# named-proof fix does not consume the one V2 retry. V2 itself is still one-shot.
+# V3 intentionally uses a new ledger. Prior V1/V2 attempts do not consume this
+# retry because V3 adds a new deterministic semantic capability. V3 itself is
+# still one-shot for a (room, job_id, content_hash).
 _RETRY_SCHEMA = """
-CREATE TABLE IF NOT EXISTS job_success_human_retries_v2 (
+CREATE TABLE IF NOT EXISTS job_success_human_retries_v3 (
     room TEXT NOT NULL,
     job_id TEXT NOT NULL,
     content_hash TEXT NOT NULL,
@@ -81,12 +84,13 @@ def _structured_success_block(detail: str) -> bool:
 
 
 def _named_success_pipeline(con: Any, cfg: dict[str, Any], job_id: str, **kwargs: Any) -> dict[str, Any]:
-    """Run the normal pipeline with only the Success verifier swapped."""
+    """Run the normal pipeline with the narrow V3 Success/semantic supplements."""
     return run_postclaim_pipeline(
         con,
         cfg,
         job_id,
         success_runner=validate_success_named,
+        semantic_repair_runner=repair_gpu_shared_or_known,
         **kwargs,
     )
 
@@ -129,7 +133,7 @@ def resume_success_block(
     con.executescript(_RETRY_SCHEMA)
     existing = con.execute(
         """
-        SELECT attempted_at FROM job_success_human_retries_v2
+        SELECT attempted_at FROM job_success_human_retries_v3
         WHERE room=? AND job_id=? AND content_hash=?
         """,
         (
@@ -139,14 +143,14 @@ def resume_success_block(
         ),
     ).fetchone()
     if existing is not None:
-        print("STOP: this JOB already used its one V2 local Success repair retry")
+        print("STOP: this JOB already used its one V3 local Success repair retry")
         return "RETRY_ALREADY_USED"
 
     # Consume the one-shot retry before running the pipeline so a crash cannot
     # accidentally create a repair loop.
     con.execute(
         """
-        INSERT INTO job_success_human_retries_v2(
+        INSERT INTO job_success_human_retries_v3(
           room,job_id,content_hash,attempted_at,original_detail
         ) VALUES(?,?,?,?,?)
         """,
@@ -163,7 +167,7 @@ def resume_success_block(
         """
         UPDATE job_auto_orchestrator
         SET pipeline_state='WAITING_POSTCLAIM',
-            detail='human-invoked V2 local Success repair retry',
+            detail='human-invoked V3 local Success repair retry',
             updated_at=?
         WHERE room=? AND job_id=? AND content_hash=? AND pipeline_state='BLOCKED'
         """,
@@ -183,8 +187,8 @@ def resume_success_block(
     retry_cfg = dict(cfg)
     retry_cfg["job_success_repair_attempts"] = 1
 
-    print("=== LOCAL SUCCESS REPAIR RETRY V2 ===")
-    print("Structured Success BLOCKに対し、literal named-item proof補完とfrozen-contract repairをこのJOBで1回だけ有効化します。")
+    print("=== LOCAL SUCCESS REPAIR RETRY V3 ===")
+    print("Structured Success BLOCKに対し、literal named-item proofとnarrow shared-GPU semantic repairをこのJOBで1回だけ有効化します。")
     print("CLAIM/DELIVERは送信しません。Groundingと最終Success verifierは従来どおりfail-closedです。")
 
     processed = process_sent_claims(
@@ -214,7 +218,7 @@ def resume_success_block(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Resume one structured Success block with one V2 local repair attempt"
+        description="Resume one structured Success block with one V3 local repair attempt"
     )
     parser.add_argument("job_id")
     parser.add_argument("--room", default="kibble")
