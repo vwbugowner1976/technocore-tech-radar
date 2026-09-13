@@ -17,7 +17,7 @@ class JobResumeSuccessTests(unittest.TestCase):
         self.digest = "gpu-digest"
         self.detail = (
             "success: generic Success gate blocked: structured exact-quote evidence "
-            "does not satisfy frozen contract; requirements=['R2'] grounding=['G1']; "
+            "does not satisfy frozen contract; requirements=[] grounding=['G1']; "
             "semantic fallback unavailable"
         )
         self.con.execute(
@@ -43,7 +43,7 @@ class JobResumeSuccessTests(unittest.TestCase):
             return ""
         raise AssertionError(table)
 
-    def test_structured_success_block_gets_one_v2_local_repair_retry(self):
+    def test_structured_success_block_gets_one_v3_local_repair_retry(self):
         def process(con, cfg, room="kibble", limit=2, pipeline_runner=None):
             self.assertEqual(cfg.get("job_success_repair_attempts"), 1)
             self.assertTrue(callable(pipeline_runner))
@@ -65,13 +65,13 @@ class JobResumeSuccessTests(unittest.TestCase):
 
         self.assertEqual(state, "DELIVERY_READY")
         retry = self.con.execute(
-            "SELECT original_detail FROM job_success_human_retries_v2 WHERE job_id=?",
+            "SELECT original_detail FROM job_success_human_retries_v3 WHERE job_id=?",
             (self.job_id,),
         ).fetchone()
         self.assertIsNotNone(retry)
-        self.assertIn("requirements=['R2']", retry["original_detail"])
+        self.assertIn("grounding=['G1']", retry["original_detail"])
 
-    def test_same_job_cannot_retry_v2_success_twice(self):
+    def test_same_job_cannot_retry_v3_success_twice(self):
         def process(con, cfg, room="kibble", limit=2, pipeline_runner=None):
             con.execute(
                 """
