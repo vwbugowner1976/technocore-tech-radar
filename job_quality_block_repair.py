@@ -11,6 +11,11 @@ non-empty payload for each, an adjudicator claim that the items are missing is
 contradicted by the answer text. In that case we preserve the existing answer and
 let the separate Generic Success Gate make the final decision. This wrapper never
 approves or sends anything.
+
+When a previous V3 repair attempt already consumed its one-shot ledger, the
+current pipeline defect may only say "already attempted". For that migration case,
+we also inspect the saved V3 critique. A bypass is still allowed only if that
+saved critique itself is a missing-item claim contradicted by the reviewed answer.
 """
 
 from __future__ import annotations
@@ -66,7 +71,6 @@ def _has_payload(answer: str, anchor: str) -> bool:
     if idx < 0:
         return False
     tail = text[idx + len(anchor): idx + len(anchor) + 180]
-    # Require some real content after the named item, not merely the label itself.
     payload_tokens = [
         token
         for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", tail)
@@ -113,6 +117,37 @@ def _explicit_success_coverage(
     return True, pair
 
 
+def _saved_v3_critique(
+    con: Any,
+    *,
+    room: str,
+    job_id: str,
+    content_hash: str,
+) -> str:
+    """Return the saved V3 critique for this exact JOB binding, if any."""
+    try:
+        row = con.execute(
+            """
+            SELECT status,critique
+            FROM job_quality_patch_repairs_v3
+            WHERE room=? AND job_id=? AND content_hash=?
+            """,
+            (str(room), str(job_id), str(content_hash)),
+        ).fetchone()
+    except Exception:
+        return ""
+    if row is None:
+        return ""
+    if str(row["status"] or "") not in {
+        "NO_NEW_INFORMATION",
+        "UNCHANGED",
+        "BLOCKED",
+        "DETERMINISTIC_BLOCK",
+    }:
+        return ""
+    return _clean(row["critique"])
+
+
 def repair_adjudicator_block(
     con: Any,
     cfg: dict[str, Any],
@@ -127,6 +162,8 @@ def repair_adjudicator_block(
     evaluator: Any | None = None,
 ) -> dict[str, Any]:
     """Defer contradicted missing-item defects to Generic Success; else use V3."""
+    ensure_repair_schema(con)
+
     row = con.execute(
         """
         SELECT content_hash,answer_text,confidence,model,status
@@ -140,27 +177,40 @@ def repair_adjudicator_block(
 
     if row is not None and str(row["status"]) == "REVIEWED" and str(row["content_hash"]) == str(content_hash):
         answer = _clean(row["answer_text"])
-        covered, pair = _explicit_success_coverage(job, answer, defect)
-        if covered:
-            anchors = (_anchor(pair[0]), _anchor(pair[1])) if pair else ("", "")
-            return {
-                "state": "QUALITY_REVIEWED",
-                "job_id": str(job_id),
-                "decision": "PASS",
-                "confidence": int(row["confidence"] or 0),
-                "flags_before": [],
-                "critique": (
-                    "adjudicator missing-item claim contradicted by explicit reviewed-answer "
-                    f"coverage of '{anchors[0]}' and '{anchors[1]}'; deferring final judgment "
-                    "to the Generic Success Gate"
-                ),
-                "answer": answer,
-                "repair_attempted": True,
-                "adjudication_attempted": True,
-                "adjudication_repair_attempted": False,
-                "repair_strategy": "explicit-success-coverage-bypass-v1",
-                "model": str(row["model"] or model or ""),
-            }
+        defect_sources = [
+            ("current-adjudicator-defect", _clean(defect)),
+        ]
+        saved_v3 = _saved_v3_critique(
+            con,
+            room=room,
+            job_id=job_id,
+            content_hash=content_hash,
+        )
+        if saved_v3 and saved_v3 != defect_sources[0][1]:
+            defect_sources.append(("saved-v3-critique", saved_v3))
+
+        for source, candidate_defect in defect_sources:
+            covered, pair = _explicit_success_coverage(job, answer, candidate_defect)
+            if covered:
+                anchors = (_anchor(pair[0]), _anchor(pair[1])) if pair else ("", "")
+                return {
+                    "state": "QUALITY_REVIEWED",
+                    "job_id": str(job_id),
+                    "decision": "PASS",
+                    "confidence": int(row["confidence"] or 0),
+                    "flags_before": [],
+                    "critique": (
+                        "adjudicator missing-item claim contradicted by explicit reviewed-answer "
+                        f"coverage of '{anchors[0]}' and '{anchors[1]}' using {source}; "
+                        "deferring final judgment to the Generic Success Gate"
+                    ),
+                    "answer": answer,
+                    "repair_attempted": True,
+                    "adjudication_attempted": True,
+                    "adjudication_repair_attempted": False,
+                    "repair_strategy": "explicit-success-coverage-bypass-v2",
+                    "model": str(row["model"] or model or ""),
+                }
 
     return _repair_adjudicator_block_v3(
         con,
