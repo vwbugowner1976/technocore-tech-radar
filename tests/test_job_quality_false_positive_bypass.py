@@ -74,8 +74,55 @@ class JobQualityFalsePositiveBypassTests(unittest.TestCase):
         self.assertEqual(result["state"], "QUALITY_REVIEWED")
         self.assertEqual(result["decision"], "PASS")
         self.assertEqual(result["answer"], self.answer)
-        self.assertEqual(result["repair_strategy"], "explicit-success-coverage-bypass-v1")
+        self.assertEqual(result["repair_strategy"], "explicit-success-coverage-bypass-v2")
         self.assertIn("Generic Success Gate", result["critique"])
+        self.assertIn("current-adjudicator-defect", result["critique"])
+
+    def test_saved_v3_missing_item_critique_can_bypass_already_attempted_defect(self):
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.con.execute(
+            """
+            INSERT INTO job_quality_patch_repairs_v3(
+              room,job_id,content_hash,attempted_at,defect_hash,status,micro_attempts,
+              confidence,critique,first_addition_hash,final_addition_hash,answer_hash
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "kibble",
+                self.job_id,
+                self.digest,
+                now,
+                "defect-hash",
+                "NO_NEW_INFORMATION",
+                2,
+                90,
+                (
+                    "The candidate answer lacks a concrete failure mode and leading indicator. "
+                    "The addition provides a specific failure mode and a leading indicator that "
+                    "is observable before the failure."
+                ),
+                "first",
+                "final",
+                "",
+            ),
+        )
+        self.con.commit()
+
+        result = repair_adjudicator_block(
+            self.con,
+            {"research_model": "fake-model"},
+            self.job_id,
+            content_hash=self.digest,
+            job=self.job,
+            defect="adjudicator-guided additive-v3 repair already attempted: NO_NEW_INFORMATION",
+            model="fake-model",
+            evaluator=lambda *a, **k: self.fail("V3 repair must not rerun after saved false-positive critique"),
+        )
+        self.assertEqual(result["state"], "QUALITY_REVIEWED")
+        self.assertEqual(result["decision"], "PASS")
+        self.assertEqual(result["answer"], self.answer)
+        self.assertEqual(result["repair_strategy"], "explicit-success-coverage-bypass-v2")
+        self.assertIn("saved-v3-critique", result["critique"])
 
     def test_bypass_does_not_trigger_when_one_success_item_is_actually_missing(self):
         self.con.execute(
