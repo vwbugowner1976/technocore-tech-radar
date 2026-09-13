@@ -10,6 +10,16 @@ from job_execution_quality_gate import quality_review
 from job_gpu_semantic_repair import repair_gpu_shared_or_known
 from job_postclaim_pipeline import run_postclaim_pipeline as _run_core
 from job_success_named_proof import validate_success_criterion as validate_success_named
+from technoscout.common import local_llm_json
+
+
+_FIDELITY_NOTE = """
+CASE FACT FIDELITY: Treat the JOB as the complete source of case-specific facts.
+Do not add measurements, dates, datasets, historical results, or prior rationale
+that the JOB does not state. Do not contradict a stated premise. General technical
+knowledge may be recommendations, not invented case history. Do not copy headings
+from unrelated task types unless this JOB asks for that concept.
+""".strip()
 
 
 def _clean(value: Any, maximum: int = 4000) -> str:
@@ -22,7 +32,36 @@ def quality_review_live(
     job_id: str,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    result = quality_review(con, cfg, job_id, **kwargs)
+    base_evaluator = kwargs.pop("evaluator", None)
+
+    def fidelity_evaluator(
+        inner_cfg: dict[str, Any],
+        llm: Any,
+        model: str,
+        prompt: str,
+        payload: dict[str, Any],
+        *,
+        max_tokens: int,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        call = base_evaluator or local_llm_json
+        return call(
+            inner_cfg,
+            llm,
+            model,
+            prompt + "\n\n" + _FIDELITY_NOTE,
+            payload,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+        )
+
+    result = quality_review(
+        con,
+        cfg,
+        job_id,
+        evaluator=fidelity_evaluator,
+        **kwargs,
+    )
     if result.get("state") != "QUALITY_REVIEWED":
         return result
 
