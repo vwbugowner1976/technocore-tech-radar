@@ -43,9 +43,10 @@ class JobResumeSuccessTests(unittest.TestCase):
             return ""
         raise AssertionError(table)
 
-    def test_structured_success_block_gets_one_local_repair_retry(self):
-        def run_once(con, cfg, room="kibble", limit=2):
+    def test_structured_success_block_gets_one_v2_local_repair_retry(self):
+        def process(con, cfg, room="kibble", limit=2, pipeline_runner=None):
             self.assertEqual(cfg.get("job_success_repair_attempts"), 1)
+            self.assertTrue(callable(pipeline_runner))
             con.execute(
                 """
                 UPDATE job_auto_orchestrator
@@ -55,23 +56,23 @@ class JobResumeSuccessTests(unittest.TestCase):
                 (room, self.job_id, self.digest),
             )
             con.commit()
-            return {"processed": [{"job_id": self.job_id, "state": "DELIVERY_READY"}]}
+            return [{"job_id": self.job_id, "state": "DELIVERY_READY"}]
 
         with patch("job_resume_success._latest_status", side_effect=self._status), patch(
-            "job_resume_success.run_auto_once", side_effect=run_once
+            "job_resume_success.process_sent_claims", side_effect=process
         ):
             state = resume_success_block(self.con, {"job_success_repair_attempts": 0}, self.job_id)
 
         self.assertEqual(state, "DELIVERY_READY")
         retry = self.con.execute(
-            "SELECT original_detail FROM job_success_human_retries WHERE job_id=?",
+            "SELECT original_detail FROM job_success_human_retries_v2 WHERE job_id=?",
             (self.job_id,),
         ).fetchone()
         self.assertIsNotNone(retry)
         self.assertIn("requirements=['R2']", retry["original_detail"])
 
-    def test_same_job_cannot_retry_success_twice(self):
-        def run_once(con, cfg, room="kibble", limit=2):
+    def test_same_job_cannot_retry_v2_success_twice(self):
+        def process(con, cfg, room="kibble", limit=2, pipeline_runner=None):
             con.execute(
                 """
                 UPDATE job_auto_orchestrator
@@ -81,10 +82,10 @@ class JobResumeSuccessTests(unittest.TestCase):
                 (self.detail, room, self.job_id, self.digest),
             )
             con.commit()
-            return {"processed": [{"job_id": self.job_id, "state": "BLOCKED"}]}
+            return [{"job_id": self.job_id, "state": "BLOCKED"}]
 
         with patch("job_resume_success._latest_status", side_effect=self._status), patch(
-            "job_resume_success.run_auto_once", side_effect=run_once
+            "job_resume_success.process_sent_claims", side_effect=process
         ):
             first = resume_success_block(self.con, {}, self.job_id)
             second = resume_success_block(self.con, {}, self.job_id)
@@ -99,12 +100,12 @@ class JobResumeSuccessTests(unittest.TestCase):
         )
         self.con.commit()
         with patch("job_resume_success._latest_status") as status, patch(
-            "job_resume_success.run_auto_once"
-        ) as run_once:
+            "job_resume_success.process_sent_claims"
+        ) as process:
             state = resume_success_block(self.con, {}, self.job_id)
         self.assertEqual(state, "BLOCKED_OTHER_REASON")
         status.assert_not_called()
-        run_once.assert_not_called()
+        process.assert_not_called()
 
 
 if __name__ == "__main__":
