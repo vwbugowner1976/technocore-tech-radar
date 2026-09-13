@@ -51,12 +51,7 @@ def _latest_status(con: Any, table: str, order_col: str, room: str, job_id: str)
     return str(row["status"]) if row is not None else ""
 
 
-def _set_pipeline_terminal(
-    con: Any,
-    tracked: Any,
-    state: str,
-    detail: str,
-) -> None:
+def _set_pipeline_terminal(con: Any, tracked: Any, state: str, detail: str) -> None:
     con.execute(
         """
         UPDATE job_auto_orchestrator
@@ -75,6 +70,36 @@ def _set_pipeline_terminal(
     con.commit()
 
 
+def _terminalize_claim_unavailable(
+    con: Any,
+    tracked: Any,
+    job_id: str,
+    room: str,
+    live_state: str,
+) -> str:
+    state = (
+        "ABANDONED_CLAIM_NOT_RETAINED"
+        if live_state == "JOB_NOT_RETAINED"
+        else "ABANDONED_CLAIM_NOT_OPEN"
+    )
+    con.execute(
+        """
+        UPDATE job_claim_trials
+        SET status='BLOCKED', detail=?
+        WHERE room=? AND job_id=? AND status IN ('PREPARED','ARMED')
+        """,
+        (f"claim live check: {live_state}", str(room), str(job_id)),
+    )
+    _set_pipeline_terminal(
+        con,
+        tracked,
+        state,
+        f"claim opportunity is no longer available: {live_state}",
+    )
+    print(f"STOP: CLAIM opportunity is no longer available: {live_state}; nothing was sent.")
+    return state
+
+
 def _delivery_viability_preflight(
     con: Any,
     cfg: dict[str, Any],
@@ -85,7 +110,6 @@ def _delivery_viability_preflight(
     exact_fetcher: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = fetch_exact_job,
     readiness_checker: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = live_delivery_ready,
 ) -> str:
-    """READ-only check before expensive local work or delivery review."""
     claim, reason = claimed_trial(con, job_id, room=room)
     if claim is None:
         print(f"Delivery preflight | BLOCKED: {reason}")
@@ -127,17 +151,8 @@ def _delivery_viability_preflight(
         "ALREADY_CLOSED",
     }
     if live_state in terminal:
-        terminal_state = (
-            "DELIVERED"
-            if live_state == "ALREADY_DELIVERED"
-            else "ABANDONED_DELIVERY_UNAVAILABLE"
-        )
-        _set_pipeline_terminal(
-            con,
-            tracked,
-            terminal_state,
-            f"delivery preflight: {live_state}",
-        )
+        terminal_state = "DELIVERED" if live_state == "ALREADY_DELIVERED" else "ABANDONED_DELIVERY_UNAVAILABLE"
+        _set_pipeline_terminal(con, tracked, terminal_state, f"delivery preflight: {live_state}")
         print(f"STOP: delivery is no longer viable: {live_state}")
         return terminal_state
 
@@ -165,7 +180,37 @@ def _confirm(label: str, job_id: str, send_phrase: str) -> bool:
     return True
 
 
-def _claim_flow(con: Any, cfg: dict[str, Any], job_id: str, room: str) -> str:
+def _confirm_job_id(label: str, job_id: str) -> bool:
+    try:
+        typed = input(f"{label}を承認するなら {job_id} を入力: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n{label}は承認しませんでした")
+        return False
+    if typed != job_id:
+        print(f"{label}は承認しませんでした")
+        return False
+    return True
+
+
+def _confirm_send(label: str, send_phrase: str) -> bool:
+    try:
+        typed = input(f"{label}を送信するなら {send_phrase} と入力: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n{label}は送信しませんでした")
+        return False
+    if typed != send_phrase:
+        print(f"{label}は送信しませんでした")
+        return False
+    return True
+
+
+def _claim_flow(
+    con: Any,
+    cfg: dict[str, Any],
+    job_id: str,
+    room: str,
+    tracked: Any,
+) -> str:
     print("=== CLAIM REVIEW ===")
     prepared = prepare_claim(con, cfg, job_id, room=room)
     print(f"Claim | state={prepared.get('state')} job={job_id}")
@@ -196,14 +241,20 @@ def _claim_flow(con: Any, cfg: dict[str, Any], job_id: str, room: str) -> str:
     print(f"body={one(job['body'], 1200)}")
     print(f"CLAIM WOULD SEND: {prepared['claim_text']}")
 
-    if not _confirm("CLAIM", job_id, "SEND CLAIM"):
+    if not _confirm_job_id("CLAIM", job_id):
         return "CANCELLED_BY_HUMAN"
 
     approved = approve_claim(con, cfg, job_id, room=room)
     print(f"Claim approve | state={approved.get('state')}")
     if approved.get("state") != "ARMED":
+        live_state = str((approved.get("live") or {}).get("state", ""))
         print(f"reason={approved.get('reason','unknown')}")
+        if live_state in {"NOT_OPEN", "JOB_NOT_RETAINED"}:
+            return _terminalize_claim_unavailable(con, tracked, job_id, room, live_state)
         return str(approved.get("state", "BLOCKED"))
+
+    if not _confirm_send("CLAIM", "SEND CLAIM"):
+        return "CANCELLED_BY_HUMAN"
 
     try:
         sent = send_claim(con, cfg, job_id, room=room)
@@ -211,6 +262,10 @@ def _claim_flow(con: Any, cfg: dict[str, Any], job_id: str, room: str) -> str:
         print(f"Claim send | STOP {type(exc).__name__}: {exc}")
         return "SEND_EXCEPTION"
     print(f"Claim send | state={sent.get('state')} seq={sent.get('seq','-')}")
+    if sent.get("state") != "SENT":
+        live_state = str((sent.get("live") or {}).get("state", ""))
+        if live_state in {"NOT_OPEN", "JOB_NOT_RETAINED"}:
+            return _terminalize_claim_unavailable(con, tracked, job_id, room, live_state)
     return str(sent.get("state", "BLOCKED"))
 
 
@@ -247,13 +302,7 @@ def _grounding_only_block(detail: str) -> bool:
     )
 
 
-def _retry_grounding_only_local_block(
-    con: Any,
-    cfg: dict[str, Any],
-    job_id: str,
-    room: str,
-    tracked: Any,
-) -> str:
+def _retry_grounding_only_local_block(con: Any, cfg: dict[str, Any], job_id: str, room: str, tracked: Any) -> str:
     detail = str(tracked["detail"] or "")
     if not _grounding_only_block(detail):
         return "BLOCKED"
@@ -358,7 +407,7 @@ def run_action(con: Any, cfg: dict[str, Any], job_id: str, *, room: str = "kibbl
         return "BLOCKED"
 
     if claim_state != "SENT":
-        claim_result = _claim_flow(con, cfg, job_id, room)
+        claim_result = _claim_flow(con, cfg, job_id, room, tracked)
         if claim_result != "SENT":
             return claim_result
         tracked = _latest_auto(con, room, job_id) or tracked
@@ -366,8 +415,6 @@ def run_action(con: Any, cfg: dict[str, Any], job_id: str, *, room: str = "kibbl
     tracked = _latest_auto(con, room, job_id) or tracked
     pipeline_state = str(tracked["pipeline_state"] or "")
 
-    # Every already-SENT claim gets a fresh READ-only viability check, including
-    # jobs whose previous local run left delivery PREPARED/APPROVED/DELIVERY_READY.
     preflight = _delivery_viability_preflight(con, cfg, job_id, room, tracked)
     if preflight != "READY_CONFIRMED":
         return preflight
