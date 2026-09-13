@@ -25,6 +25,8 @@ KNOWN_REASONS = (
     "adjudicator-guided repair returned the candidate answer unchanged",
     "adjudicator-guided repair already attempted: UNCHANGED",
     "adjudicator-guided addition contains no new information",
+    "adjudicator-guided additive-v3 repair still contains no new information",
+    "adjudicator-guided additive-v3 repair already attempted: NO_NEW_INFORMATION",
     (
         "The candidate answer does not provide a concrete failure mode and leading "
         "indicator as requested. It only mentions memory fragmentation and an "
