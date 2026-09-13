@@ -85,7 +85,7 @@ def _delivery_viability_preflight(
     exact_fetcher: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = fetch_exact_job,
     readiness_checker: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = live_delivery_ready,
 ) -> str:
-    """READ-only check before expensive local work or a fresh delivery prepare."""
+    """READ-only check before expensive local work or delivery review."""
     claim, reason = claimed_trial(con, job_id, room=room)
     if claim is None:
         print(f"Delivery preflight | BLOCKED: {reason}")
@@ -366,17 +366,20 @@ def run_action(con: Any, cfg: dict[str, Any], job_id: str, *, room: str = "kibbl
     tracked = _latest_auto(con, room, job_id) or tracked
     pipeline_state = str(tracked["pipeline_state"] or "")
 
-    if delivery_state not in {"PREPARED", "APPROVED"}:
-        preflight = _delivery_viability_preflight(con, cfg, job_id, room, tracked)
-        if preflight != "READY_CONFIRMED":
-            return preflight
+    # Every already-SENT claim gets a fresh READ-only viability check, including
+    # jobs whose previous local run left delivery PREPARED/APPROVED/DELIVERY_READY.
+    preflight = _delivery_viability_preflight(con, cfg, job_id, room, tracked)
+    if preflight != "READY_CONFIRMED":
+        return preflight
 
+    ran_pipeline = False
     if pipeline_state != "DELIVERY_READY":
+        ran_pipeline = True
         pipeline_state = _run_local_pipeline(con, cfg, job_id, room)
 
     if pipeline_state == "DELIVERY_READY":
-        refreshed = _latest_auto(con, room, job_id) or tracked
-        if delivery_state not in {"PREPARED", "APPROVED"}:
+        if ran_pipeline:
+            refreshed = _latest_auto(con, room, job_id) or tracked
             preflight = _delivery_viability_preflight(con, cfg, job_id, room, refreshed)
             if preflight != "READY_CONFIRMED":
                 return preflight
