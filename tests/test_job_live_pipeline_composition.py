@@ -4,7 +4,6 @@ from unittest.mock import patch
 import job_auto_orchestrator
 import job_postclaim_pipeline_live
 from job_gpu_semantic_repair import repair_gpu_shared_or_known
-from job_success_named_proof import validate_success_criterion as validate_success_named
 
 
 class JobLivePipelineCompositionTests(unittest.TestCase):
@@ -22,7 +21,14 @@ class JobLivePipelineCompositionTests(unittest.TestCase):
             )
 
         self.assertEqual(result["state"], "READY_FOR_HUMAN_DELIVERY")
-        self.assertIs(seen["success_runner"], validate_success_named)
+        self.assertIs(
+            seen["quality_runner"],
+            job_postclaim_pipeline_live.quality_review_live,
+        )
+        self.assertIs(
+            seen["success_runner"],
+            job_postclaim_pipeline_live.validate_success_live,
+        )
         self.assertIs(seen["semantic_repair_runner"], repair_gpu_shared_or_known)
         self.assertEqual(seen["cfg"]["job_execution_quality_timeout_seconds"], 180.0)
         self.assertEqual(seen["cfg"]["job_success_verify_timeout_seconds"], 180.0)
