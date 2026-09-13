@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from job_answer_fidelity import fidelity_flags
+import job_postclaim_pipeline_live as live
 
 
 JOB = {
@@ -13,18 +15,33 @@ JOB = {
     ),
 }
 
+BAD = (
+    "A future maintainer should record the decision context. "
+    "Leading indicator: The alert threshold was set based on historical load data "
+    "from the previous quarter, which showed a consistent pattern of dips."
+)
+
 
 class AnswerFidelityTests(unittest.TestCase):
     def test_rejects_observed_bad_delivery(self):
-        answer = (
-            "A future maintainer should record the decision context. "
-            "Leading indicator: The alert threshold was set based on historical load data "
-            "from the previous quarter, which showed a consistent pattern of dips."
-        )
-        flags = fidelity_flags(JOB, answer)
+        flags = fidelity_flags(JOB, BAD)
         self.assertTrue(any("template label" in flag for flag in flags))
         self.assertTrue(any("gut-feeling" in flag for flag in flags))
         self.assertTrue(any("previous quarter" in flag for flag in flags))
+
+    def test_live_quality_wrapper_blocks_observed_bad_delivery(self):
+        with patch(
+            "job_postclaim_pipeline_live.quality_review",
+            return_value={"state": "QUALITY_REVIEWED", "answer": BAD},
+        ):
+            result = live.quality_review_live(
+                object(),
+                {},
+                "k5d24498c45",
+                exact_fetcher=lambda cfg, candidate: {"state": "EXACT", "job": JOB},
+            )
+        self.assertEqual(result["state"], "BLOCKED")
+        self.assertIn("answer fidelity guard", result["reason"])
 
     def test_allows_grounded_constraint_and_rejected_alternative(self):
         answer = (
