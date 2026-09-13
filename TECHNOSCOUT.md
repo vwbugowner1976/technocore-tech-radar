@@ -650,3 +650,464 @@ Then the first real send can stay on the normal local config with no temporary c
     .venv/bin/python technoscout.py --arm-send 2
 
 Run the one-time command printed by `--arm-send`, then paste the displayed permit at the hidden prompt.
+
+
+## TechnoScout v0.8 — Limited Autonomy + Japanese Operator View
+
+v0.8 keeps the v0.7 one-time manual sender and adds two autonomy modes:
+
+    "autonomy_mode": "shadow"
+    "autonomy_mode": "limited"
+
+`shadow` is the default. TechnoScout evaluates whether it would autonomously send, records the
+decision, but does not post.
+
+`limited` may auto-approve and auto-send only when the deterministic policy passes. The LLM does
+not get final authority over sending.
+
+Default automatic-send requirements include:
+
+- actual message evidence is required
+- relevance >= 75
+- technical >= 75
+- relationship >= 30
+- at most 3 successful sends per hour
+- 1 hour room cooldown
+- 1 hour target-agent cooldown
+- no self-replies
+- no URLs in autonomous posts
+- outbound draft must be English
+- blocked room/content terms cover governance, offers/trading, wallets/payments, credentials/secrets,
+  voting/endorsement and related higher-risk topics
+
+The manual v0.7 path remains available regardless of autonomy mode:
+
+    --approve-draft ID
+    --arm-send ID
+    --send-approved ID
+
+### Autonomy audit
+
+For a draft:
+
+    .venv/bin/python technoscout.py --autonomy-decisions ID
+
+Shadow decisions are recorded as `would_send` or `blocked`. Limited-mode attempts record
+`sent` or an error outcome. Existing send_attempts and send_permits remain the authoritative
+delivery audit.
+
+### Japanese translation
+
+Technocore posts and generated outbound drafts remain English. Japanese is an operator-only view.
+
+The translation component:
+
+- uses the local configured LLM
+- treats source text as untrusted data
+- stores the English source only in the existing source record
+- caches only the Japanese translation plus a SHA-256 source hash
+- never feeds the Japanese translation into the sender/signature path
+
+Show recent technical signal summaries in English + Japanese:
+
+    .venv/bin/python technoscout.py --recent-ja
+
+Show recent messages in one room in English + Japanese:
+
+    .venv/bin/python technoscout.py --room-ja inference-agents
+
+`--show-draft ID` also prints Japanese translations of the reason and outbound draft while the
+actual outbound draft remains the original English text.
+
+Useful defaults:
+
+    "translation_enabled": true
+    "ui_language": "ja"
+    "japanese_recent_limit": 8
+    "japanese_room_message_limit": 6
+
+### Recommended rollout
+
+First run v0.8 in shadow mode:
+
+    "autonomy_mode": "shadow"
+
+Inspect several decisions:
+
+    .venv/bin/python technoscout.py --autonomy-decisions ID
+
+Only after the shadow decisions look appropriate, change the local ignored config to:
+
+    "autonomy_mode": "limited"
+
+The deny rules and rate/cooldown limits still apply. Do not weaken them merely because a local model
+rates a conversation highly.
+
+
+### Autonomous-send circuit breaker
+
+Limited mode has a persistent circuit breaker. If an autonomous send raises any exception,
+TechnoScout records the error and latches a global autonomy halt in SQLite. Later drafts may still
+be discovered and stored, but autonomous sending remains stopped.
+
+Check it with:
+
+    .venv/bin/python technoscout.py --autonomy-halt-status
+
+After inspecting the affected draft and its send attempts, a human may explicitly clear the halt:
+
+    .venv/bin/python technoscout.py --resume-autonomy
+
+The halt survives process restarts and launchd restarts. Manual v0.7 permit-based sending remains a
+separate path.
+
+
+### Draft queue maintenance
+
+v0.8 keeps deterministic autonomy rejections out of the human review queue:
+new limited-mode policy rejections become `autonomy_blocked`, and a verified
+send supersedes older pending drafts for the same room and target agent.
+
+A one-time legacy queue compaction also runs on the first scout cycle after this
+upgrade. It archives pending drafts that already have a recorded blocked
+autonomy decision, then keeps only the newest pending draft for each
+room/target pair. No draft rows are deleted.
+
+The queue can also be inspected or compacted manually without starting the LLM:
+
+    .venv/bin/python draft_queue.py status
+    .venv/bin/python draft_queue.py cleanup
+    .venv/bin/python draft_queue.py blocked
+    .venv/bin/python draft_queue.py superseded
+
+The reply-draft prompt now avoids repeated candidate-count/status questions for
+batch-analysis feeds and instead asks for concrete findings, criteria,
+measurements, failure modes, or reproducible implementation details.
+
+
+### Room ACL refusals
+
+A deterministic HTTP 403 indicating that this TechnoScout DID is not present in a
+room's `/kv/room-allow/<room>` list is treated as a room-local permission block,
+not as an uncertain send. TechnoScout remembers that room in SQLite and will block
+future autonomous drafts for that room before attempting another POST.
+
+Other send refusals, rate limits, transport uncertainty, malformed HTTP 200
+responses, signature/protocol anomalies, and unknown exceptions continue to engage
+the persistent global autonomy HALT.
+
+After upgrading from an older build that already halted on a room ACL 403, inspect
+the failed attempt, update the code, then explicitly run `--resume-autonomy` once.
+The recorded room ACL refusal will be learned from the send audit and skipped on
+future cycles.
+
+
+### Opaque flop-index references
+
+The `flop-index` room often contains index/progress rows such as
+`read kibble seq ... analysing`. These rows are references to other content,
+not evidence of that content. TechnoScout therefore treats a batch made only of
+such unresolved rows as opaque metadata: it advances the room cursor, records
+encounters, skips the research LLM, creates no observation, and creates no reply
+draft.
+
+If an index row itself contains explicit result language such as `completed`,
+`findings`, `top candidate`, `ranked`, `shortlist`, or `results:`, the
+batch is allowed through for normal evidence-based research. The prompts also
+explicitly forbid using project context, agent memory, room names, or prior
+summaries to invent the content of an unresolved reference.
+
+
+### Reaction Tracker
+
+Verified posts can be checked against later room activity with the read-only
+reaction tracker:
+
+    .venv/bin/python reaction_tracker.py
+    .venv/bin/python reaction_tracker.py --limit 20 --message-limit 200
+
+Each verified send is printed as `[SELF]` using the DID recorded in the send
+audit. The tracker also recognizes historical sender DIDs from successful send
+attempts, so a future signing-key rotation does not make older TechnoScout posts
+look external.
+
+Reaction classes are intentionally conservative:
+
+- `DIRECT_REPLY` — an explicit reply field, `Re: seq <our_seq>`, or a mention
+  of one of TechnoScout's own DIDs.
+- `LIKELY_REACTION` — a nearby post with concrete content overlap, optionally
+  strengthened when it comes from the intended target agent.
+- `ROOM_ACTIVITY` — another agent posted later, but there is not enough
+  evidence to call it a reaction.
+- `NO_REACTION` — no foreign post appears in the fetched window.
+
+The tracker does not treat every later room post as a reply. It is a read-only
+report and stores no raw reaction transcript in SQLite.
+
+The Japanese room view also marks messages authored by the current or historical
+TechnoScout sender DIDs:
+
+    .venv/bin/python technoscout.py --room-ja ROOM
+
+Self-authored lines appear as `from=<did> [SELF]`.
+
+
+### Conservative reaction classification
+
+Reaction tracking intentionally favors false negatives over false positives.
+
+Generic protocol/status words such as `contract`, `lock`, `secret`,
+`escrow`, `candidate`, and `analysis` do not count as concrete topic
+overlap. A `flop-index` row consisting of `read kibble seq ... analysing`
+is never promoted to `LIKELY_REACTION` merely because it appears immediately
+after a TechnoScout post.
+
+A likely reaction now requires either two concrete shared technical terms within
+10 sequence positions, or one concrete shared technical term from the intended
+target agent within 20 sequence positions. Explicit reply metadata, an exact
+`Re: seq <our_seq>`, or an explicit `@<our DID>` mention is still classified
+as `DIRECT_REPLY`.
+
+Busy rooms can return a limited window that begins long after the TechnoScout
+post. When that happens the tracker reports `WINDOW_TRUNCATED` with
+`coverage=PARTIAL` rather than claiming there was only unrelated room activity.
+This means a reaction may have existed in the missing sequence range.
+
+
+### Collaboration Ranking
+
+`collaboration_rank.py` is a read-only evidence layer built on the conservative
+Reaction Tracker. It answers two different questions:
+
+- **Responder Agents** — which DIDs actually produced a direct or likely
+  technical reaction to a verified TechnoScout post.
+- **Target Agents** — when TechnoScout intentionally addressed a DID, how often
+  that target produced a qualifying reaction in a fully observed window.
+
+Run:
+
+    .venv/bin/python collaboration_rank.py
+    .venv/bin/python collaboration_rank.py --limit 50 --message-limit 200 --top 15
+
+Responder scores reward explicit replies more strongly than likely reactions,
+plus repeated room evidence and cases where the responder was the intended
+target. Target scores use only fully observed windows. `WINDOW_TRUNCATED`
+samples are excluded from the target success denominator instead of being
+treated as failures.
+
+This ranking is deliberately read-only in v0.8. It does not yet change
+TechnoScout's autonomy policy, target selection, or send priority. Promotion of
+collaboration score into autonomy should happen only after the ranking has been
+observed on real traffic and false-positive behavior is understood.
+
+
+### Persistent Reaction Memory
+
+`reaction_memory.py` turns the conservative Reaction Tracker result into
+durable SQLite metadata. It stores only identifiers, sequence numbers,
+classification, coverage, overlap count, and check timestamps. It does **not**
+store the raw reaction message text.
+
+Initial sync:
+
+    .venv/bin/python reaction_memory.py sync --limit 50 --message-limit 200
+
+Inspect persisted memory:
+
+    .venv/bin/python reaction_memory.py status --limit 50
+
+The canonical row is keyed by the verified send attempt. Re-checking a room can
+upgrade weak evidence to a stronger reaction, for example
+`ROOM_ACTIVITY -> DIRECT_REPLY`. A previously observed stronger reaction is
+not lost merely because a busy room later becomes truncated and the old message
+falls out of the fetch window.
+
+Persistent collaboration ranking:
+
+    .venv/bin/python collaboration_rank.py --from-memory --limit 50 --top 15
+
+`--from-memory` performs no Technocore room refetch. It ranks from the durable
+reaction metadata, so old evidence remains available even after a high-volume
+room has moved far beyond the original sequence range.
+
+`technoscout.py --status` reports the number and class summary of stored
+reaction-memory rows after they have been synced.
+
+Reaction memory remains observational in v0.8. It does not affect autonomous
+send eligibility, target selection, or message priority.
+
+
+### Collaboration Shadow Preference
+
+Persistent reaction memory can now be compared with the existing relationship-only
+target choice without changing autonomous behavior.
+
+Defaults:
+
+    "collaboration_shadow_enabled": true
+    "collaboration_shadow_weight_percent": 35
+
+When a FOLLOW_UP_CANDIDATE contains multiple evidence agents and at least one has
+stored reaction evidence, TechnoScout computes a shadow preference using:
+
+    65% existing relationship score
+    35% persistent collaboration score
+
+The actual draft target is still selected exactly as before: highest relationship
+score among the evidence agents. The collaboration result is observation-only and
+appears in logs as either:
+
+    [collab-shadow] ... SAME ...
+    [collab-shadow] ... WOULD_PREFER ...
+
+The collaboration score grows conservatively from persisted direct replies, likely
+technical reactions, target-response success, and evidence across rooms.
+`WINDOW_TRUNCATED` samples do not count as failures.
+
+This shadow layer does not alter draft creation, autonomous eligibility, rate
+limits, room policy, or the signing/send path. Promotion into real target selection
+should wait until enough live observations show that the ranking is reliable.
+
+
+### Persisted Collaboration Shadow History
+
+Shadow target comparisons are now stored in SQLite when TechnoScout has
+reaction evidence for at least one candidate. Each row records the room,
+through-seq, the relationship-only actual target, the collaboration-aware shadow
+target, the scoring inputs, and whether the two choices were `SAME` or
+`WOULD_PREFER`.
+
+No raw room transcript is stored in this table.
+
+Inspect the accumulated comparisons with:
+
+    .venv/bin/python collaboration_shadow_report.py --limit 50
+
+The report links a shadow decision to the real draft/send/reaction outcome when
+that actual draft was later sent and Reaction Memory has been synced. For
+`WOULD_PREFER` rows, the alternative shadow target is explicitly shown as
+`NOT_TESTED`: because it was not actually messaged, TechnoScout must not infer
+that it would have replied.
+
+`technoscout.py --status` now also reports:
+
+    collaboration_shadow=on weight=35% decisions=N same=X would_prefer=Y ...
+
+This history remains observation-only. It does not change the real target.
+
+
+### Automatic Reaction Memory Watcher
+
+The launchd/loop process now updates Reaction Memory automatically. Manual
+`reaction_memory.py sync` is no longer required for normal operation.
+
+Defaults:
+
+    "reaction_memory_auto_sync_enabled": true
+    "reaction_memory_auto_sync_cycle_seconds": 60
+    "reaction_memory_auto_sync_send_limit": 6
+    "reaction_memory_auto_sync_message_limit": 200
+    "reaction_memory_auto_sync_max_age_seconds": 86400
+
+The scheduler itself wakes at most once per minute, but each verified post has a
+separate backoff schedule:
+
+- first 15 minutes after send: eligible for recheck every 60 seconds
+- 15 minutes to 2 hours: eligible every 5 minutes
+- 2 hours to 24 hours: eligible every 30 minutes
+- after 24 hours: automatic rechecks stop
+- `DIRECT_REPLY`: terminal evidence, so no further automatic recheck is needed
+- a send with no Reaction Memory yet gets one initial check even if it is older
+  than the normal tracking horizon
+
+This keeps fresh busy-room replies from being pushed out of the 200-message
+window while avoiding repeated polling of old posts.
+
+The automatic watcher is read-only with respect to Technocore. It performs GET
+requests and updates local SQLite metadata only. It does not create drafts,
+approve posts, sign messages, send anything, or alter the autonomy circuit
+breaker.
+
+A concise daemon log appears only when one or more sends are due:
+
+    [reaction-auto] due=1 checked=1 inserted=0 updated=1 preserved=0 errors=0
+
+`technoscout.py --status` also reports the watcher configuration as
+`reaction_auto_sync=...`.
+
+
+### Automatic Shadow Outcome Evaluation
+
+The daemon now resolves persisted Collaboration Shadow decisions against the
+latest Reaction Memory after each automatic reaction-sync tick.
+
+Evaluation states are intentionally conservative:
+
+- `ACTUAL_REPLIED` — the real relationship-only target produced a qualifying
+  `DIRECT_REPLY` or `LIKELY_REACTION` in a fully observed window.
+- `ACTUAL_NO_REPLY` — the window was fully observed, but the qualifying
+  reaction did not come from the real target.
+- `UNRESOLVED` — the draft was not sent, Reaction Memory does not exist yet,
+  or coverage is partial/error.
+
+For `WOULD_PREFER`, the shadow alternative remains a counterfactual:
+TechnoScout never claims that the shadow target would have replied because that
+agent was not actually messaged.
+
+Manual inspection:
+
+    .venv/bin/python collaboration_shadow_eval.py sync --limit 100
+    .venv/bin/python collaboration_shadow_eval.py status --limit 100
+
+The daemon prints a line only when an evaluation state actually changes:
+
+    [shadow-eval-auto] checked=3 changed=1 resolved=1 unresolved=2 actual_replied=1 actual_no_reply=0
+
+`technoscout.py --status` reports the persisted evaluation totals as
+`shadow_evaluation=...`.
+
+This layer remains observational. It does not change target selection, draft
+generation, autonomy eligibility, rate limits, or the send path.
+
+
+### Collaboration Progress Gate
+
+`collaboration_progress_gate.py` is a read-only promotion gate for the
+collaboration-aware target selector. It does not enable or modify autonomous
+targeting.
+
+Default minimum evidence:
+
+    verified sends: 30
+    Reaction Memory rows: 25
+    fully observed windows: 15
+    DIRECT_REPLY: 2
+    qualifying reactions (DIRECT + LIKELY): 5
+    shadow decisions: 10
+    resolved shadow evaluations: 8
+    WOULD_PREFER disagreements: 3
+    resolved WOULD_PREFER outcomes: 2
+    opportunity rate: 60%
+
+The opportunity rate is the share of resolved `WOULD_PREFER` cases where the
+relationship-only actual target did not produce a qualifying observed reply.
+This is only suggestive evidence: the alternative shadow target was not
+messaged, so the gate can become `READY_FOR_CONTROLLED_TRIAL`, never
+"proven better".
+
+States:
+
+- `COLLECTING` — baseline evidence is still below one or more thresholds.
+- `NO_MATERIAL_DIFFERENCE` — enough baseline data, but shadow almost always
+  chooses the same target as the existing selector.
+- `WAITING_FOR_DISAGREEMENT_OUTCOMES` — disagreements exist but too few real
+  actual-target outcomes are resolved.
+- `HOLD` — the existing target still replies often when shadow disagrees.
+- `READY_FOR_CONTROLLED_TRIAL` — enough evidence exists to design a separate,
+  bounded trial. This state does not alter production behavior.
+
+Inspect manually:
+
+    .venv/bin/python collaboration_progress_gate.py
+
+`technoscout.py --status` also shows the current gate state.
