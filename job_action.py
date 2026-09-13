@@ -1,37 +1,22 @@
 #!/usr/bin/env python3
-"""Unified human action flow for one tracked TechnoScout JOB.
-
-This command is the copy/paste entry point used by ntfy. It preserves the two
-mandatory human approval boundaries while removing the need to remember separate
-prepare/approve/send commands.
-
-Flow:
-  CLAIM_READY -> review -> explicit CLAIM approval -> signed CLAIM
-              -> local post-claim pipeline (no signed write)
-              -> review -> explicit DELIVER approval -> signed DELIVER
-
-Safety properties:
-- accepts only validated kXXXXXXXXXX job ids
-- only operates on jobs already tracked by job_auto_orchestrator
-- raw JOB content is review-only and never executed
-- exact reviewed JOB is persisted locally before CLAIM for retention-safe local work
-- CLAIM and DELIVER each require exact job-id confirmation plus a distinct SEND phrase
-- no automatic retry after signed-write uncertainty/terminal states
-- a prior local Success-stage grounding-only BLOCK may be retried once on a new
-  human invocation; this retry contains no signed write
-- existing claim/delivery live revalidation and one-use permits remain authoritative
-"""
+"""Unified human action flow for one tracked TechnoScout JOB."""
 
 from __future__ import annotations
 
 import argparse
 import re
-from typing import Any
+from typing import Any, Callable
 
 from job_auto_orchestrator import ensure_auto_schema, run_once as run_auto_once
-from job_candidate_refiner import _runtime_defaults
+from job_candidate_refiner import _runtime_defaults, fetch_exact_job
 from job_claim_trial import approve_claim, prepare_claim, send_claim
-from job_delivery_trial import approve_delivery, prepare_delivery, send_delivery
+from job_delivery_trial import (
+    approve_delivery,
+    live_delivery_ready,
+    prepare_delivery,
+    send_delivery,
+)
+from job_execution_draft import claimed_trial
 from job_local_evidence import store_exact_job_snapshot
 from technoscout.common import utc_now
 from technoscout.db import connect
@@ -66,6 +51,100 @@ def _latest_status(con: Any, table: str, order_col: str, room: str, job_id: str)
     return str(row["status"]) if row is not None else ""
 
 
+def _set_pipeline_terminal(
+    con: Any,
+    tracked: Any,
+    state: str,
+    detail: str,
+) -> None:
+    con.execute(
+        """
+        UPDATE job_auto_orchestrator
+        SET pipeline_state=?, detail=?, updated_at=?
+        WHERE room=? AND job_id=? AND content_hash=?
+        """,
+        (
+            str(state),
+            str(detail)[:500],
+            utc_now(),
+            str(tracked["room"]),
+            str(tracked["job_id"]),
+            str(tracked["content_hash"]),
+        ),
+    )
+    con.commit()
+
+
+def _delivery_viability_preflight(
+    con: Any,
+    cfg: dict[str, Any],
+    job_id: str,
+    room: str,
+    tracked: Any,
+    *,
+    exact_fetcher: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = fetch_exact_job,
+    readiness_checker: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = live_delivery_ready,
+) -> str:
+    """READ-only check before expensive local work or a fresh delivery prepare."""
+    claim, reason = claimed_trial(con, job_id, room=room)
+    if claim is None:
+        print(f"Delivery preflight | BLOCKED: {reason}")
+        return "BLOCKED"
+
+    candidate = {
+        "room": claim["room"],
+        "job_id": claim["job_id"],
+        "job_seq": claim["job_seq"],
+        "issuer_did": claim["issuer_did"],
+        "content_hash": claim["content_hash"],
+    }
+    exact = exact_fetcher(cfg, candidate)
+    exact_state = str(exact.get("state", "UNKNOWN"))
+    if exact_state != "EXACT":
+        print(f"Delivery preflight | exact JOB={exact_state}")
+        if exact_state == "NOT_RETAINED":
+            _set_pipeline_terminal(
+                con,
+                tracked,
+                "ABANDONED_NOT_RETAINED",
+                "delivery preflight: exact JOB is no longer retained",
+            )
+            print("STOP: exact JOB is no longer retained; no local retry, re-CLAIM, or DELIVER.")
+            return "ABANDONED_NOT_RETAINED"
+        return f"PREFLIGHT_{exact_state}"
+
+    live = readiness_checker(cfg, claim)
+    live_state = str(live.get("state", "UNKNOWN"))
+    print(f"Delivery preflight | live={live_state}")
+    if live_state == "READY_CONFIRMED":
+        return "READY_CONFIRMED"
+
+    terminal = {
+        "CLAIM_NOT_RETAINED",
+        "CLAIM_MISMATCH",
+        "CLAIM_CONFLICT",
+        "ALREADY_DELIVERED",
+        "ALREADY_CLOSED",
+    }
+    if live_state in terminal:
+        terminal_state = (
+            "DELIVERED"
+            if live_state == "ALREADY_DELIVERED"
+            else "ABANDONED_DELIVERY_UNAVAILABLE"
+        )
+        _set_pipeline_terminal(
+            con,
+            tracked,
+            terminal_state,
+            f"delivery preflight: {live_state}",
+        )
+        print(f"STOP: delivery is no longer viable: {live_state}")
+        return terminal_state
+
+    print(f"STOP: delivery preflight is inconclusive: {live_state}; local work not started.")
+    return f"PREFLIGHT_{live_state}"
+
+
 def _confirm(label: str, job_id: str, send_phrase: str) -> bool:
     try:
         typed_job = input(f"{label}を承認するなら {job_id} を入力: ").strip()
@@ -96,10 +175,6 @@ def _claim_flow(con: Any, cfg: dict[str, Any], job_id: str, room: str) -> str:
 
     job = prepared["job"]
     candidate = prepared["candidate"]
-
-    # Persist the exact, already-verified untrusted JOB before any signed CLAIM.
-    # This snapshot is only local evidence for DRAFT/REVIEW/QUALITY retries; it
-    # never replaces DELIVER's fresh live lifecycle/conflict check.
     snapshot = store_exact_job_snapshot(con, candidate, job)
     print(f"Local JOB snapshot | state={snapshot.get('state','UNKNOWN')}")
     if snapshot.get("state") not in {"SNAPSHOT_STORED", "SNAPSHOT_VERIFIED"}:
@@ -133,7 +208,6 @@ def _claim_flow(con: Any, cfg: dict[str, Any], job_id: str, room: str) -> str:
     try:
         sent = send_claim(con, cfg, job_id, room=room)
     except Exception as exc:
-        # Existing send code persists REFUSED/UNCERTAIN terminal state. Never retry here.
         print(f"Claim send | STOP {type(exc).__name__}: {exc}")
         return "SEND_EXCEPTION"
     print(f"Claim send | state={sent.get('state')} seq={sent.get('seq','-')}")
@@ -180,12 +254,6 @@ def _retry_grounding_only_local_block(
     room: str,
     tracked: Any,
 ) -> str:
-    """Re-arm only the local pipeline for a known grounding-only Success block.
-
-    This never changes CLAIM/DELIVER trial status and never performs a signed
-    write. The normal post-claim pipeline performs all retained-claim, exact-JOB,
-    Success, quality, and delivery-readiness checks again.
-    """
     detail = str(tracked["detail"] or "")
     if not _grounding_only_block(detail):
         return "BLOCKED"
@@ -239,7 +307,6 @@ def _delivery_flow(con: Any, cfg: dict[str, Any], job_id: str, room: str) -> str
     try:
         sent = send_delivery(con, cfg, job_id, room=room)
     except Exception as exc:
-        # Existing send code persists REFUSED/UNCERTAIN terminal state. Never retry here.
         print(f"Delivery send | STOP {type(exc).__name__}: {exc}")
         return "SEND_EXCEPTION"
     print(f"Delivery send | state={sent.get('state')} seq={sent.get('seq','-')}")
@@ -260,6 +327,9 @@ def run_action(con: Any, cfg: dict[str, Any], job_id: str, *, room: str = "kibbl
     claim_state = _latest_status(con, "job_claim_trials", "prepared_at", room, job_id)
     delivery_state = _latest_status(con, "job_delivery_trials", "prepared_at", room, job_id)
 
+    if pipeline_state.startswith("ABANDONED_"):
+        print(f"STOP: {job_id} is terminal: {pipeline_state}")
+        return pipeline_state
     if delivery_state == "SENT" or pipeline_state == "DELIVERED":
         print(f"DONE: {job_id} is already delivered")
         return "DELIVERED"
@@ -271,8 +341,16 @@ def run_action(con: Any, cfg: dict[str, Any], job_id: str, *, room: str = "kibbl
         return claim_state
 
     if pipeline_state == "BLOCKED":
+        if _grounding_only_block(str(tracked["detail"] or "")):
+            preflight = _delivery_viability_preflight(con, cfg, job_id, room, tracked)
+            if preflight != "READY_CONFIRMED":
+                return preflight
         retried = _retry_grounding_only_local_block(con, cfg, job_id, room, tracked)
         if retried == "DELIVERY_READY":
+            refreshed = _latest_auto(con, room, job_id) or tracked
+            preflight = _delivery_viability_preflight(con, cfg, job_id, room, refreshed)
+            if preflight != "READY_CONFIRMED":
+                return preflight
             return _delivery_flow(con, cfg, job_id, room)
         if retried != "BLOCKED":
             return retried
@@ -283,14 +361,25 @@ def run_action(con: Any, cfg: dict[str, Any], job_id: str, *, room: str = "kibbl
         claim_result = _claim_flow(con, cfg, job_id, room)
         if claim_result != "SENT":
             return claim_result
+        tracked = _latest_auto(con, room, job_id) or tracked
 
-    # A human-confirmed CLAIM is now SENT. The local pipeline contains no signed write.
-    tracked = _latest_auto(con, room, job_id)
-    pipeline_state = str(tracked["pipeline_state"] or "") if tracked is not None else ""
+    tracked = _latest_auto(con, room, job_id) or tracked
+    pipeline_state = str(tracked["pipeline_state"] or "")
+
+    if delivery_state not in {"PREPARED", "APPROVED"}:
+        preflight = _delivery_viability_preflight(con, cfg, job_id, room, tracked)
+        if preflight != "READY_CONFIRMED":
+            return preflight
+
     if pipeline_state != "DELIVERY_READY":
         pipeline_state = _run_local_pipeline(con, cfg, job_id, room)
 
     if pipeline_state == "DELIVERY_READY":
+        refreshed = _latest_auto(con, room, job_id) or tracked
+        if delivery_state not in {"PREPARED", "APPROVED"}:
+            preflight = _delivery_viability_preflight(con, cfg, job_id, room, refreshed)
+            if preflight != "READY_CONFIRMED":
+                return preflight
         return _delivery_flow(con, cfg, job_id, room)
     if pipeline_state == "BLOCKED":
         return "BLOCKED"
