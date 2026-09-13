@@ -15,6 +15,7 @@ import unittest
 
 TESTS = [
     "tests.test_job_flow_e2e",
+    "tests.test_job_live_pipeline_composition",
     "tests.test_job_gpu_semantic_repair",
     "tests.test_job_success_named_proof",
     "tests.test_job_resume_success",
