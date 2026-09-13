@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from job_answer_fidelity import fidelity_flags
+from job_execution_quality_gate import quality_review
 from job_gpu_semantic_repair import repair_gpu_shared_or_known
 from job_postclaim_pipeline import run_postclaim_pipeline as _run_core
 from job_success_named_proof import validate_success_criterion as validate_success_named
@@ -12,6 +14,36 @@ from job_success_named_proof import validate_success_criterion as validate_succe
 
 def _clean(value: Any, maximum: int = 4000) -> str:
     return " ".join(str(value or "").split())[:maximum]
+
+
+def quality_review_live(
+    con: Any,
+    cfg: dict[str, Any],
+    job_id: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    result = quality_review(con, cfg, job_id, **kwargs)
+    if result.get("state") != "QUALITY_REVIEWED":
+        return result
+
+    exact_fetcher = kwargs.get("exact_fetcher")
+    if exact_fetcher is None:
+        return result
+    exact = exact_fetcher(cfg, {})
+    if exact.get("state") != "EXACT":
+        return {
+            "state": "BLOCKED",
+            "reason": f"answer fidelity exact JOB unavailable: {exact.get('state','UNKNOWN')}",
+        }
+
+    flags = fidelity_flags(exact["job"], str(result.get("answer", "")))
+    if flags:
+        return {
+            "state": "BLOCKED",
+            "reason": "answer fidelity guard: " + "; ".join(flags),
+            "fidelity_flags": flags,
+        }
+    return result
 
 
 def _grounding_bridge(result: dict[str, Any], candidate_answer: str) -> str:
@@ -114,6 +146,7 @@ def run_postclaim_pipeline(
     job_id: str,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    kwargs.setdefault("quality_runner", quality_review_live)
     kwargs.setdefault("success_runner", validate_success_live)
     kwargs.setdefault("semantic_repair_runner", repair_gpu_shared_or_known)
     try:
@@ -122,4 +155,9 @@ def run_postclaim_pipeline(
         return _run_core(con, _live_cfg(cfg, retry=True), job_id, **kwargs)
 
 
-__all__ = ["run_postclaim_pipeline", "validate_success_live", "_grounding_bridge"]
+__all__ = [
+    "run_postclaim_pipeline",
+    "quality_review_live",
+    "validate_success_live",
+    "_grounding_bridge",
+]
