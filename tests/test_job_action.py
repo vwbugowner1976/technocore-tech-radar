@@ -33,24 +33,53 @@ class JobActionTests(unittest.TestCase):
             state = job_action.run_action(None, {}, JOB)
         self.assertEqual(state, "SENT")
         claim.assert_called_once()
-        self.assertGreaterEqual(preflight.call_count, 1)
+        self.assertEqual(preflight.call_count, 2)
         pipeline.assert_called_once()
         delivery.assert_called_once()
 
-    def test_delivery_ready_resumes_without_claim_or_pipeline(self):
-        tracked = {"pipeline_state": "DELIVERY_READY", "detail": ""}
+    def test_delivery_ready_prepared_still_preflights_before_delivery(self):
+        tracked = {
+            "pipeline_state": "DELIVERY_READY",
+            "detail": "",
+            "room": "kibble",
+            "job_id": JOB,
+            "content_hash": "digest",
+        }
         with (
             patch("job_action._latest_auto", return_value=tracked),
             patch("job_action._latest_status", side_effect=["SENT", "PREPARED"]),
+            patch("job_action._delivery_viability_preflight", return_value="READY_CONFIRMED") as preflight,
             patch("job_action._claim_flow") as claim,
             patch("job_action._run_local_pipeline") as pipeline,
             patch("job_action._delivery_flow", return_value="SENT") as delivery,
         ):
             state = job_action.run_action(None, {}, JOB)
         self.assertEqual(state, "SENT")
+        preflight.assert_called_once()
         claim.assert_not_called()
         pipeline.assert_not_called()
         delivery.assert_called_once()
+
+    def test_prepared_delivery_not_retained_stops_before_delivery_flow(self):
+        tracked = {
+            "pipeline_state": "DELIVERY_READY",
+            "detail": "",
+            "room": "kibble",
+            "job_id": JOB,
+            "content_hash": "digest",
+        }
+        with (
+            patch("job_action._latest_auto", return_value=tracked),
+            patch("job_action._latest_status", side_effect=["SENT", "PREPARED"]),
+            patch("job_action._delivery_viability_preflight", return_value="ABANDONED_NOT_RETAINED") as preflight,
+            patch("job_action._run_local_pipeline") as pipeline,
+            patch("job_action._delivery_flow") as delivery,
+        ):
+            state = job_action.run_action(None, {}, JOB)
+        self.assertEqual(state, "ABANDONED_NOT_RETAINED")
+        preflight.assert_called_once()
+        pipeline.assert_not_called()
+        delivery.assert_not_called()
 
     def test_blocked_pipeline_never_enters_human_send_flows(self):
         tracked = {"pipeline_state": "BLOCKED", "detail": "quality gate failed"}
@@ -88,7 +117,7 @@ class JobActionTests(unittest.TestCase):
         ):
             state = job_action.run_action(None, {}, JOB)
         self.assertEqual(state, "SENT")
-        self.assertGreaterEqual(preflight.call_count, 1)
+        self.assertEqual(preflight.call_count, 2)
         retry.assert_called_once()
         claim.assert_not_called()
         delivery.assert_called_once()
