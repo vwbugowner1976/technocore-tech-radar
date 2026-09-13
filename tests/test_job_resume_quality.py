@@ -129,6 +129,30 @@ class JobResumeQualityTests(unittest.TestCase):
         self.con.commit()
         self._assert_resumes()
 
+    def test_additive_v3_duplicate_can_resume_to_false_positive_guard(self):
+        self.con.execute(
+            """
+            UPDATE job_auto_orchestrator
+            SET detail='quality-adjudication-repair: adjudicator-guided additive-v3 repair still contains no new information'
+            WHERE job_id=?
+            """,
+            (self.job_id,),
+        )
+        self.con.commit()
+        self._assert_resumes()
+
+    def test_additive_v3_already_attempted_can_resume_to_saved_critique_guard(self):
+        self.con.execute(
+            """
+            UPDATE job_auto_orchestrator
+            SET detail='quality-adjudication-repair: adjudicator-guided additive-v3 repair already attempted: NO_NEW_INFORMATION'
+            WHERE job_id=?
+            """,
+            (self.job_id,),
+        )
+        self.con.commit()
+        self._assert_resumes()
+
     def test_other_block_reason_is_not_rearmed(self):
         self.con.execute(
             "UPDATE job_auto_orchestrator SET detail='success: unrelated failure' WHERE job_id=?",
