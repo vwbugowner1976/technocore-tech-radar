@@ -23,15 +23,17 @@ class JobActionTests(unittest.TestCase):
         tracked_before = {"pipeline_state": "WAITING_FOR_HUMAN_CLAIM", "detail": ""}
         tracked_after = {"pipeline_state": "WAITING_POSTCLAIM", "detail": ""}
         with (
-            patch("job_action._latest_auto", side_effect=[tracked_before, tracked_after]),
+            patch("job_action._latest_auto", side_effect=[tracked_before, tracked_after, tracked_after, tracked_after]),
             patch("job_action._latest_status", side_effect=["PREPARED", ""]),
             patch("job_action._claim_flow", return_value="SENT") as claim,
+            patch("job_action._delivery_viability_preflight", return_value="READY_CONFIRMED") as preflight,
             patch("job_action._run_local_pipeline", return_value="DELIVERY_READY") as pipeline,
             patch("job_action._delivery_flow", return_value="SENT") as delivery,
         ):
             state = job_action.run_action(None, {}, JOB)
         self.assertEqual(state, "SENT")
         claim.assert_called_once()
+        self.assertGreaterEqual(preflight.call_count, 1)
         pipeline.assert_called_once()
         delivery.assert_called_once()
 
@@ -63,11 +65,11 @@ class JobActionTests(unittest.TestCase):
         claim.assert_not_called()
         delivery.assert_not_called()
 
-    def test_grounding_only_success_block_retries_local_pipeline_then_delivery(self):
+    def test_grounding_only_success_block_preflights_then_retries(self):
         detail = (
             "success: generic Success gate blocked: structured exact-quote evidence "
             "does not satisfy frozen contract; requirements=[] grounding=['G1']; "
-            "semantic fallback unavailable: JOB does not match a supported deterministic semantic repair"
+            "semantic fallback unavailable"
         )
         tracked = {
             "pipeline_state": "BLOCKED",
@@ -79,15 +81,49 @@ class JobActionTests(unittest.TestCase):
         with (
             patch("job_action._latest_auto", return_value=tracked),
             patch("job_action._latest_status", side_effect=["SENT", ""]),
+            patch("job_action._delivery_viability_preflight", return_value="READY_CONFIRMED") as preflight,
             patch("job_action._retry_grounding_only_local_block", return_value="DELIVERY_READY") as retry,
             patch("job_action._claim_flow") as claim,
             patch("job_action._delivery_flow", return_value="SENT") as delivery,
         ):
             state = job_action.run_action(None, {}, JOB)
         self.assertEqual(state, "SENT")
+        self.assertGreaterEqual(preflight.call_count, 1)
         retry.assert_called_once()
         claim.assert_not_called()
         delivery.assert_called_once()
+
+    def test_not_retained_preflight_stops_before_local_pipeline(self):
+        tracked = {
+            "pipeline_state": "WAITING_POSTCLAIM",
+            "detail": "",
+            "room": "kibble",
+            "job_id": JOB,
+            "content_hash": "digest",
+        }
+        with (
+            patch("job_action._latest_auto", return_value=tracked),
+            patch("job_action._latest_status", side_effect=["SENT", ""]),
+            patch("job_action._delivery_viability_preflight", return_value="ABANDONED_NOT_RETAINED") as preflight,
+            patch("job_action._run_local_pipeline") as pipeline,
+            patch("job_action._delivery_flow") as delivery,
+        ):
+            state = job_action.run_action(None, {}, JOB)
+        self.assertEqual(state, "ABANDONED_NOT_RETAINED")
+        preflight.assert_called_once()
+        pipeline.assert_not_called()
+        delivery.assert_not_called()
+
+    def test_terminal_abandoned_job_stops_immediately(self):
+        tracked = {"pipeline_state": "ABANDONED_NOT_RETAINED", "detail": "expired"}
+        with (
+            patch("job_action._latest_auto", return_value=tracked),
+            patch("job_action._latest_status", side_effect=["SENT", ""]),
+            patch("job_action._run_local_pipeline") as pipeline,
+        ):
+            state = job_action.run_action(None, {}, JOB)
+        self.assertEqual(state, "ABANDONED_NOT_RETAINED")
+        pipeline.assert_not_called()
 
     def test_confirmation_requires_job_id_and_distinct_send_phrase(self):
         with patch("builtins.input", side_effect=[JOB, "SEND CLAIM"]):
