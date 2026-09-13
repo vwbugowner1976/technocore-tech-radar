@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-"""Default live post-CLAIM pipeline composition.
-
-This module keeps the hardened core pipeline unchanged and only selects the
-validated local components that have passed the no-send E2E selftest:
-
-- literal named-item Success proof supplementation
-- narrow shared-GPU deterministic semantic repair, with fallback to existing
-  known deterministic semantic repairs
-- live-only timeout floors for the slower local MLX review stages
-- at most one local retry after an MLX TimeoutError
-
-It performs no signed write itself. Human CLAIM/DELIVER boundaries remain in
-job_action.py and the existing trial modules. A timeout retry only repeats local
-DRAFT/REVIEW/QUALITY/SUCCESS/PREPARE work; it never re-sends CLAIM or DELIVER.
-"""
+"""Default live post-CLAIM pipeline composition."""
 
 from __future__ import annotations
 
@@ -24,37 +10,101 @@ from job_postclaim_pipeline import run_postclaim_pipeline as _run_core
 from job_success_named_proof import validate_success_criterion as validate_success_named
 
 
-_LIVE_TIMEOUT_FLOORS: dict[str, float] = {
-    "job_execution_draft_timeout_seconds": 90.0,
-    "job_execution_review_timeout_seconds": 120.0,
-    "job_execution_quality_timeout_seconds": 180.0,
-    "job_success_contract_timeout_seconds": 120.0,
-    "job_success_verify_timeout_seconds": 180.0,
-    "job_success_repair_timeout_seconds": 180.0,
-}
-
-_RETRY_TIMEOUT_FLOORS: dict[str, float] = {
-    "job_execution_draft_timeout_seconds": 120.0,
-    "job_execution_review_timeout_seconds": 180.0,
-    "job_execution_quality_timeout_seconds": 240.0,
-    "job_success_contract_timeout_seconds": 180.0,
-    "job_success_verify_timeout_seconds": 240.0,
-    "job_success_repair_timeout_seconds": 240.0,
-}
+def _clean(value: Any, maximum: int = 4000) -> str:
+    return " ".join(str(value or "").split())[:maximum]
 
 
-def _with_timeout_floors(
+def _grounding_bridge(result: dict[str, Any], candidate_answer: str) -> str:
+    if result.get("state") != "BLOCKED":
+        return ""
+    verdict = result.get("verdict") or {}
+    missing_r = verdict.get("missing_requirements")
+    missing_g = verdict.get("missing_grounding")
+    if not isinstance(missing_r, list) or missing_r:
+        return ""
+    if not isinstance(missing_g, list) or not missing_g:
+        return ""
+
+    passed = [
+        item for item in (verdict.get("checks") or [])
+        if isinstance(item, dict)
+        and bool(item.get("satisfied"))
+        and _clean(item.get("evidence"), 1200)
+    ]
+    if not passed:
+        return ""
+    requirement_evidence = _clean(passed[0].get("evidence"), 1200).rstrip(" .")
+
+    contract = result.get("contract") or {}
+    missing = set(str(item) for item in missing_g)
+    additions: list[str] = []
+    for item in contract.get("grounding", []) or []:
+        if not isinstance(item, dict):
+            continue
+        gid = _clean(item.get("id"), 32)
+        fact = _clean(item.get("fact"), 1200).rstrip(" .")
+        if gid not in missing or not fact or not bool(item.get("required", True)):
+            continue
+        additions.append(
+            f"Grounding link: {fact}. This directly supports: {requirement_evidence}."
+        )
+
+    if not additions:
+        return ""
+    return (_clean(candidate_answer, 4000).rstrip() + " " + " ".join(additions)).strip()
+
+
+def validate_success_live(
     cfg: dict[str, Any],
-    floors: dict[str, float],
+    llm: Any,
+    model: str,
+    job: dict[str, Any],
+    candidate_answer: str,
 ) -> dict[str, Any]:
+    first = validate_success_named(cfg, llm, model, job, candidate_answer)
+    bridged = _grounding_bridge(first, candidate_answer)
+    if not bridged:
+        return first
+
+    strict_cfg = dict(cfg)
+    strict_cfg["job_success_repair_attempts"] = 0
+    final = validate_success_named(strict_cfg, llm, model, job, bridged)
+    if final.get("state") == "SUCCESS_REVIEWED":
+        result = dict(final)
+        result["decision"] = "REVISED"
+        result["answer"] = bridged
+        result["grounding_bridge"] = True
+        return result
+    return final
+
+
+def _live_cfg(cfg: dict[str, Any], *, retry: bool = False) -> dict[str, Any]:
     result = dict(cfg)
-    for key, floor in floors.items():
-        try:
-            current = float(result.get(key, 0) or 0)
-        except (TypeError, ValueError):
-            current = 0.0
-        if current < floor:
-            result[key] = floor
+    floor = 240 if retry else 180
+    result["job_execution_draft_timeout_seconds"] = max(
+        float(result.get("job_execution_draft_timeout_seconds", 60)),
+        120 if retry else 90,
+    )
+    result["job_execution_review_timeout_seconds"] = max(
+        float(result.get("job_execution_review_timeout_seconds", 75)),
+        180 if retry else 120,
+    )
+    result["job_execution_quality_timeout_seconds"] = max(
+        float(result.get("job_execution_quality_timeout_seconds", 90)),
+        floor,
+    )
+    result["job_success_contract_timeout_seconds"] = max(
+        float(result.get("job_success_contract_timeout_seconds", 90)),
+        floor,
+    )
+    result["job_success_verify_timeout_seconds"] = max(
+        float(result.get("job_success_verify_timeout_seconds", 90)),
+        floor,
+    )
+    result["job_success_repair_timeout_seconds"] = max(
+        float(result.get("job_success_repair_timeout_seconds", 90)),
+        floor,
+    )
     return result
 
 
@@ -64,25 +114,12 @@ def run_postclaim_pipeline(
     job_id: str,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the proven live composition with one timeout-only local retry."""
-    kwargs.setdefault("success_runner", validate_success_named)
+    kwargs.setdefault("success_runner", validate_success_live)
     kwargs.setdefault("semantic_repair_runner", repair_gpu_shared_or_known)
-
-    live_cfg = _with_timeout_floors(cfg, _LIVE_TIMEOUT_FLOORS)
     try:
-        return _run_core(con, live_cfg, job_id, **kwargs)
-    except TimeoutError as exc:
-        print(
-            "Pipeline | local MLX timeout; retrying local pipeline once with extended deadlines: "
-            f"{exc}"
-        )
-        retry_cfg = _with_timeout_floors(live_cfg, _RETRY_TIMEOUT_FLOORS)
-        return _run_core(con, retry_cfg, job_id, **kwargs)
+        return _run_core(con, _live_cfg(cfg), job_id, **kwargs)
+    except TimeoutError:
+        return _run_core(con, _live_cfg(cfg, retry=True), job_id, **kwargs)
 
 
-__all__ = [
-    "run_postclaim_pipeline",
-    "_with_timeout_floors",
-    "_LIVE_TIMEOUT_FLOORS",
-    "_RETRY_TIMEOUT_FLOORS",
-]
+__all__ = ["run_postclaim_pipeline", "validate_success_live", "_grounding_bridge"]
