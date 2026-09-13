@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Safe local orchestration around human-approved CLAIM and DELIVER boundaries.
-
-Automation stops at exactly two human-action boundaries:
-
-    SAFE_FIT READY -> local CLAIM PREPARED -> CLAIM_READY notification
-    CLAIM SENT      -> local post-claim pipeline -> DELIVER PREPARED -> DELIVERY_READY
-
-This module deliberately imports no CLAIM approve/send or DELIVER approve/send
-functions. It never signs or posts a Technocore write. JOB text remains untrusted
-and is only processed by the existing hardened local pipeline.
-"""
+"""Safe local orchestration around human-approved CLAIM and DELIVER boundaries."""
 
 from __future__ import annotations
 
@@ -48,7 +38,6 @@ CREATE TABLE IF NOT EXISTS job_auto_orchestrator (
 CREATE INDEX IF NOT EXISTS idx_job_auto_orchestrator_state
     ON job_auto_orchestrator(pipeline_state, updated_at);
 """
-
 
 CLAIM_TERMINAL = {"SENT", "UNCERTAIN", "RESERVED"}
 DELIVERY_TERMINAL = {"SENT", "UNCERTAIN", "RESERVED"}
@@ -125,6 +114,65 @@ def _latest_claim(con: Any, room: str, job_id: str) -> Any | None:
     ).fetchone()
 
 
+def _delivery_status(con: Any, room: str, job_id: str, content_hash: str) -> str:
+    ensure_delivery_schema(con)
+    row = con.execute(
+        """
+        SELECT status
+        FROM job_delivery_trials
+        WHERE room=? AND job_id=? AND content_hash=?
+        LIMIT 1
+        """,
+        (room, job_id, content_hash),
+    ).fetchone()
+    return str(row["status"]) if row is not None else ""
+
+
+def _reconcile_delivery_state(
+    con: Any,
+    *,
+    room: str,
+    job_id: str,
+    content_hash: str,
+) -> str:
+    """Make persisted delivery state authoritative over stale pipeline state."""
+    status = _delivery_status(con, room, job_id, content_hash)
+    if status in {"PREPARED", "APPROVED"}:
+        _upsert(
+            con,
+            room=room,
+            job_id=job_id,
+            content_hash=content_hash,
+            claim_state="CLAIM_SENT",
+            pipeline_state="DELIVERY_READY",
+            detail=f"delivery trial already {status}",
+        )
+        return "DELIVERY_READY"
+    if status == "SENT":
+        _upsert(
+            con,
+            room=room,
+            job_id=job_id,
+            content_hash=content_hash,
+            claim_state="CLAIM_SENT",
+            pipeline_state="DELIVERED",
+            detail="delivery trial is SENT",
+        )
+        return "DELIVERED"
+    if status in {"UNCERTAIN", "RESERVED"}:
+        _upsert(
+            con,
+            room=room,
+            job_id=job_id,
+            content_hash=content_hash,
+            claim_state="CLAIM_SENT",
+            pipeline_state="DELIVERY_TERMINAL",
+            detail=f"delivery trial is terminal: {status}",
+        )
+        return "DELIVERY_TERMINAL"
+    return ""
+
+
 def prepare_claim_ready(
     con: Any,
     cfg: dict[str, Any],
@@ -150,6 +198,14 @@ def prepare_claim_ready(
             )
             return {"state": "CLAIM_READY", "job_id": job_id, "existing": True}
         if status == "SENT":
+            delivery_override = _reconcile_delivery_state(
+                con,
+                room=room,
+                job_id=job_id,
+                content_hash=content_hash,
+            )
+            if delivery_override:
+                return {"state": delivery_override, "job_id": job_id, "existing": True}
             _upsert(
                 con,
                 room=room,
@@ -192,7 +248,6 @@ def prepare_claim_ready(
 
 
 def _sent_claim_rows(con: Any, room: str, limit: int) -> list[Any]:
-    """Return only SENT claims that this orchestrator already tracked pre-send."""
     ensure_auto_schema(con)
     return con.execute(
         """
@@ -236,32 +291,15 @@ def process_sent_claims(
         for row in rows:
             job_id = str(row["job_id"])
             content_hash = str(row["content_hash"])
-            delivery_status = str(row["delivery_status"] or "")
 
-            if delivery_status in {"PREPARED", "APPROVED"}:
-                _upsert(
-                    con,
-                    room=room,
-                    job_id=job_id,
-                    content_hash=content_hash,
-                    claim_state="CLAIM_SENT",
-                    pipeline_state="DELIVERY_READY",
-                )
-                results.append({"job_id": job_id, "state": "DELIVERY_READY", "existing": True})
-                continue
-
-            if delivery_status in DELIVERY_TERMINAL:
-                terminal_state = "DELIVERED" if delivery_status == "SENT" else "DELIVERY_TERMINAL"
-                _upsert(
-                    con,
-                    room=room,
-                    job_id=job_id,
-                    content_hash=content_hash,
-                    claim_state="CLAIM_SENT",
-                    pipeline_state=terminal_state,
-                    detail=f"delivery trial is terminal: {delivery_status}",
-                )
-                results.append({"job_id": job_id, "state": terminal_state})
+            delivery_override = _reconcile_delivery_state(
+                con,
+                room=room,
+                job_id=job_id,
+                content_hash=content_hash,
+            )
+            if delivery_override:
+                results.append({"job_id": job_id, "state": delivery_override, "existing": True})
                 continue
 
             if not model:
@@ -288,6 +326,19 @@ def process_sent_claims(
                 llm=llm,
                 model=model,
             )
+
+            # Human job_action.py may have prepared/approved/sent while this
+            # background pipeline was running. Persisted delivery state wins.
+            delivery_override = _reconcile_delivery_state(
+                con,
+                room=room,
+                job_id=job_id,
+                content_hash=content_hash,
+            )
+            if delivery_override:
+                results.append({"job_id": job_id, "state": delivery_override, "raced": True})
+                continue
+
             if result.get("state") == "READY_FOR_HUMAN_DELIVERY":
                 _upsert(
                     con,
@@ -347,6 +398,15 @@ def publish_pending_notifications(
         content_hash = str(row["content_hash"])
         pipeline_state = str(row["pipeline_state"])
 
+        delivery_override = _reconcile_delivery_state(
+            con,
+            room=room,
+            job_id=job_id,
+            content_hash=content_hash,
+        )
+        if delivery_override:
+            pipeline_state = delivery_override
+
         if (
             str(row["claim_state"]) == "CLAIM_READY"
             and pipeline_state == "WAITING_FOR_HUMAN_CLAIM"
@@ -374,6 +434,16 @@ def publish_pending_notifications(
                 stats["failed"] += 1
 
         if pipeline_state == "BLOCKED" and not int(row["blocked_notified"]):
+            # Re-check immediately before sending a BLOCKED notification so a
+            # concurrent successful human DELIVER can never be reported as stale failure.
+            delivery_override = _reconcile_delivery_state(
+                con,
+                room=room,
+                job_id=job_id,
+                content_hash=content_hash,
+            )
+            if delivery_override:
+                continue
             stage = str(row["detail"] or "blocked").split(":", 1)[0]
             notice = blocked_notifier(cfg, job_id, stage)
             if notice.get("state") == "PUBLISHED_LOCAL":
@@ -403,7 +473,6 @@ def run_once(
     delivery_notifier: Callable[[dict[str, Any], str], dict[str, str]] = notify_delivery_ready,
     blocked_notifier: Callable[[dict[str, Any], str, str], dict[str, str]] = notify_job_blocked,
 ) -> dict[str, Any]:
-    """One safe orchestration pass. No signed write exists in this call graph."""
     ensure_auto_schema(con)
     prepared = None
     if ready_job_id:
