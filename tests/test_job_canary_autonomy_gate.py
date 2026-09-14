@@ -1,10 +1,14 @@
 import sqlite3
 import unittest
+from unittest.mock import patch
 
+from job_canary_auto import ensure_canary_schema
 from job_canary_autonomy_gate import (
     autonomy_summary,
     ensure_autonomy_schema,
     normalize_autonomy,
+    pending_shadow_rows,
+    review_pending,
     review_shadow_candidate,
 )
 
@@ -21,6 +25,7 @@ class CanaryAutonomyGateTests(unittest.TestCase):
     def setUp(self):
         self.con = sqlite3.connect(":memory:")
         self.con.row_factory = sqlite3.Row
+        ensure_canary_schema(self.con)
         ensure_autonomy_schema(self.con)
         self.candidate = {
             "room": "kibble",
@@ -82,6 +87,39 @@ class CanaryAutonomyGateTests(unittest.TestCase):
         self.assertTrue(llm.closed)
         report = autonomy_summary(self.con)
         self.assertEqual(report["auto_safe"], 1)
+
+    def test_pending_persists_candidate_unavailable_fail_closed_outcome(self):
+        self.con.execute(
+            """
+            INSERT INTO job_canary_shadow_observations(
+              room,job_id,content_hash,verdict,reason,job_type,relevance,technical_fit,
+              confidence,issuer_score,attested_jobs,completion_rate_percent,live_state,observed_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "kibble", "kstale00001", "stale-digest", "SHADOW_ELIGIBLE", "fixture",
+                "explain", 80, 90, 95, 99, 10, 90, "OPEN_CONFIRMED", "2026-09-14T00:00:00+00:00",
+            ),
+        )
+        self.con.commit()
+
+        unavailable = {
+            "state": "NEEDS_HUMAN",
+            "confidence": 100,
+            "reason": "candidate unavailable: SAFE_FIT refinement is older than 900s",
+            "job_id": "kstale00001",
+            "recorded": False,
+        }
+        with patch("job_canary_autonomy_gate.review_shadow_candidate", return_value=unavailable):
+            results = review_pending(self.con, {}, room="kibble", limit=1)
+
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["recorded"])
+        report = autonomy_summary(self.con)
+        self.assertEqual(report["total"], 1)
+        self.assertEqual(report["needs_human"], 1)
+        self.assertIn("older than 900s", report["rows"][0]["reason"])
+        self.assertEqual(pending_shadow_rows(self.con, room="kibble", limit=10), [])
 
 
 if __name__ == "__main__":
