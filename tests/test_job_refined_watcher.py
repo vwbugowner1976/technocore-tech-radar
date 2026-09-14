@@ -4,7 +4,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from job_candidate_refiner import ensure_refiner_schema
-from job_refined_watcher import pending_candidate_rows, run_once, shadow_canary_for_summary
+from job_refined_watcher import (
+    autonomy_for_shadow,
+    pending_candidate_rows,
+    run_once,
+    shadow_canary_for_summary,
+)
 from job_shadow import ensure_job_shadow_schema, record_job_shadow_candidate
 
 
@@ -187,6 +192,36 @@ class JobRefinedWatcherTests(unittest.TestCase):
             self.cfg,
             {"ready": False, "ready_job_id": ""},
             observer=observer,
+        )
+        self.assertIsNone(skipped)
+        self.assertEqual(len(calls), 1)
+
+    def test_autonomy_hook_runs_only_for_shadow_eligible(self):
+        calls = []
+
+        def reviewer(con, cfg, job_id, room):
+            calls.append((job_id, room))
+            return {
+                "state": "AUTO_SAFE",
+                "confidence": 96,
+                "reason": "fixture",
+                "job_id": job_id,
+            }
+
+        result = autonomy_for_shadow(
+            self.con,
+            self.cfg,
+            {"state": "SHADOW_ELIGIBLE", "job_id": "kabcdef0123"},
+            reviewer=reviewer,
+        )
+        self.assertEqual(result["state"], "AUTO_SAFE")
+        self.assertEqual(calls, [("kabcdef0123", "kibble")])
+
+        skipped = autonomy_for_shadow(
+            self.con,
+            self.cfg,
+            {"state": "SHADOW_SKIP", "job_id": "kabcdef0123"},
+            reviewer=reviewer,
         )
         self.assertIsNone(skipped)
         self.assertEqual(len(calls), 1)
