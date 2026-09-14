@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from job_candidate_refiner import ensure_refiner_schema
-from job_refined_watcher import pending_candidate_rows, run_once
+from job_refined_watcher import pending_candidate_rows, run_once, shadow_canary_for_summary
 from job_shadow import ensure_job_shadow_schema, record_job_shadow_candidate
 
 
@@ -165,6 +165,31 @@ class JobRefinedWatcherTests(unittest.TestCase):
         self.assertTrue(summary["ready"])
         self.assertEqual(summary["ready_job_id"], "kabcdef0123")
         self.assertTrue(llm.closed)
+
+    def test_shadow_canary_hook_runs_only_for_ready_summary(self):
+        calls = []
+
+        def observer(con, cfg, job_id, room):
+            calls.append((job_id, room))
+            return {"state": "SHADOW_ELIGIBLE", "job_id": job_id, "reason": "fixture"}
+
+        result = shadow_canary_for_summary(
+            self.con,
+            self.cfg,
+            {"ready": True, "ready_job_id": "kabcdef0123"},
+            observer=observer,
+        )
+        self.assertEqual(result["state"], "SHADOW_ELIGIBLE")
+        self.assertEqual(calls, [("kabcdef0123", "kibble")])
+
+        skipped = shadow_canary_for_summary(
+            self.con,
+            self.cfg,
+            {"ready": False, "ready_job_id": ""},
+            observer=observer,
+        )
+        self.assertIsNone(skipped)
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":
