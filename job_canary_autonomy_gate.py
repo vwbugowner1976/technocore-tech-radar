@@ -3,9 +3,15 @@
 
 from __future__ import annotations
 
+import argparse
 from typing import Any, Callable
 
+from job_candidate_refiner import _runtime_defaults, fetch_exact_job
+from job_claim_trial import candidate_for_claim
 from technoscout.common import clamp_score, local_llm_json, utc_now
+from technoscout.db import connect
+from technoscout.llm_backend import create_llm_backend
+from technoscout_cli import database_path, load_config
 
 
 AUTONOMY_SCHEMA = """
@@ -122,3 +128,162 @@ def store_autonomy_review(
         ),
     )
     con.commit()
+
+
+def review_shadow_candidate(
+    con: Any,
+    cfg: dict[str, Any],
+    job_id: str,
+    *,
+    room: str = "kibble",
+    candidate_loader: Callable[..., tuple[dict[str, Any] | None, str]] = candidate_for_claim,
+    exact_fetcher: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = fetch_exact_job,
+    llm_factory: Callable[[dict[str, Any]], Any] = create_llm_backend,
+    reviewer: Callable[..., dict[str, Any]] = review_autonomy,
+) -> dict[str, Any]:
+    ensure_autonomy_schema(con)
+    candidate, reason = candidate_loader(con, cfg, job_id, room=room)
+    if candidate is None:
+        return {
+            "state": "NEEDS_HUMAN",
+            "confidence": 100,
+            "reason": f"candidate unavailable: {reason}",
+            "job_id": job_id,
+            "recorded": False,
+        }
+
+    exact = exact_fetcher(cfg, candidate)
+    exact_state = str(exact.get("state", "UNKNOWN"))
+    if exact_state != "EXACT":
+        result = {
+            "decision": "NEEDS_HUMAN",
+            "confidence": 100,
+            "reason": f"exact JOB unavailable for autonomy review: {exact_state}",
+        }
+        store_autonomy_review(con, candidate, result)
+        return {
+            "state": result["decision"],
+            "confidence": result["confidence"],
+            "reason": result["reason"],
+            "job_id": job_id,
+            "recorded": True,
+        }
+
+    model = str(cfg.get("research_model") or cfg.get("triage_model") or "").strip()
+    if not model:
+        result = {
+            "decision": "NEEDS_HUMAN",
+            "confidence": 100,
+            "reason": "no configured local model for autonomy review",
+        }
+        store_autonomy_review(con, candidate, result)
+        return {"state": result["decision"], "confidence": 100, "reason": result["reason"], "job_id": job_id, "recorded": True}
+
+    llm = llm_factory(cfg)
+    try:
+        result = reviewer(cfg, llm, model, exact["job"])
+    except Exception as exc:
+        result = {
+            "decision": "NEEDS_HUMAN",
+            "confidence": 100,
+            "reason": f"autonomy review failed closed: {type(exc).__name__}",
+        }
+    finally:
+        llm.close()
+
+    result = normalize_autonomy(result)
+    store_autonomy_review(con, candidate, result)
+    return {
+        "state": result["decision"],
+        "confidence": result["confidence"],
+        "reason": result["reason"],
+        "job_id": job_id,
+        "recorded": True,
+    }
+
+
+def pending_shadow_rows(con: Any, *, room: str = "kibble", limit: int = 5) -> list[dict[str, Any]]:
+    ensure_autonomy_schema(con)
+    rows = con.execute(
+        """
+        SELECT s.room,s.job_id,s.content_hash,s.observed_at
+        FROM job_canary_shadow_observations AS s
+        LEFT JOIN job_canary_autonomy_reviews AS a
+          ON a.room=s.room AND a.job_id=s.job_id AND a.content_hash=s.content_hash
+        WHERE s.room=? AND s.verdict='SHADOW_ELIGIBLE' AND a.job_id IS NULL
+        ORDER BY s.observed_at DESC
+        LIMIT ?
+        """,
+        (str(room), max(1, min(20, int(limit)))),
+    ).fetchall()
+    return [{key: row[key] for key in row.keys()} for row in rows]
+
+
+def review_pending(con: Any, cfg: dict[str, Any], *, room: str = "kibble", limit: int = 5) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for row in pending_shadow_rows(con, room=room, limit=limit):
+        results.append(review_shadow_candidate(con, cfg, str(row["job_id"]), room=room))
+    return results
+
+
+def autonomy_summary(con: Any, *, room: str = "kibble", limit: int = 10) -> dict[str, Any]:
+    ensure_autonomy_schema(con)
+    total = con.execute(
+        "SELECT COUNT(*) AS n FROM job_canary_autonomy_reviews WHERE room=?",
+        (str(room),),
+    ).fetchone()
+    safe = con.execute(
+        "SELECT COUNT(*) AS n FROM job_canary_autonomy_reviews WHERE room=? AND decision='AUTO_SAFE'",
+        (str(room),),
+    ).fetchone()
+    rows = con.execute(
+        "SELECT * FROM job_canary_autonomy_reviews WHERE room=? ORDER BY reviewed_at DESC LIMIT ?",
+        (str(room), max(1, min(50, int(limit)))),
+    ).fetchall()
+    return {
+        "total": int(total["n"] or 0),
+        "auto_safe": int(safe["n"] or 0),
+        "needs_human": int(total["n"] or 0) - int(safe["n"] or 0),
+        "rows": [{key: row[key] for key in row.keys()} for row in rows],
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Read-only Shadow CANARY autonomy reviewer")
+    parser.add_argument("--config", default="technoscout.config.json")
+    sub = parser.add_subparsers(dest="command", required=True)
+    pending = sub.add_parser("pending")
+    pending.add_argument("--limit", type=int, default=5)
+    status = sub.add_parser("status")
+    status.add_argument("--limit", type=int, default=10)
+    args = parser.parse_args()
+
+    cfg = _runtime_defaults(load_config(args.config))
+    room = str(cfg.get("job_shadow_room", "kibble"))
+    con = connect(database_path(cfg))
+    try:
+        if args.command == "pending":
+            results = review_pending(con, cfg, room=room, limit=args.limit)
+            print(f"Shadow Autonomy Review | reviewed={len(results)}")
+            for item in results:
+                print(
+                    f"  {item['job_id']} {item['state']} conf={item['confidence']}"
+                )
+                print(f"    reason={item['reason']}")
+        else:
+            summary = autonomy_summary(con, room=room, limit=args.limit)
+            print(
+                f"Shadow Autonomy | total={summary['total']} "
+                f"auto_safe={summary['auto_safe']} needs_human={summary['needs_human']}"
+            )
+            for row in summary["rows"]:
+                print(
+                    f"  {row['job_id']} {row['decision']} conf={row['confidence']}"
+                )
+                print(f"    reason={row['reason']}")
+    finally:
+        con.close()
+
+
+if __name__ == "__main__":
+    main()
