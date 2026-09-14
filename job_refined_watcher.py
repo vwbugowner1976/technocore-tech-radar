@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
 """One-shot read-only watcher for fresh Kibble semantic candidates.
 
-The watcher closes the timing gap between Job Shadow discovery and manual semantic
-refinement. It only considers fresh signed self-contained candidates from credible
-issuers that have not already been refined for the same content hash. Before loading
-Qwen, it performs export-aware live OPEN revalidation. Only an OPEN_CONFIRMED job is
-sent to the local semantic refiner.
-
-This module never CLAIMs, sends, executes job content, opens job URLs, spends FLOP,
-touches wallets/credentials, or changes TechnoScout autonomy. A SAFE_FIT result can
-only produce read-only READY evidence through the existing Refined Job Gate.
-
-The CLI entrypoint records a read-only Shadow CANARY verdict for READY evidence, then
-hands the READY id to job_auto_orchestrator. Shadow CANARY never approves or sends a
-CLAIM/DELIVER; the existing human boundary remains unchanged.
+The watcher refines fresh self-contained candidates, records read-only Shadow CANARY
+observations, and may run a second local autonomy review. It never approves or sends
+CLAIM/DELIVER writes; the existing human boundary remains unchanged.
 """
 
 from __future__ import annotations
@@ -23,6 +13,7 @@ from typing import Any, Callable
 
 from job_auto_orchestrator import run_once as run_auto_once
 from job_canary_auto import shadow_observe_candidate
+from job_canary_autonomy_gate import review_shadow_candidate
 from job_candidate_refiner import (
     _runtime_defaults,
     ensure_refiner_schema,
@@ -47,7 +38,6 @@ def pending_candidate_rows(
     limit: int = 1,
     max_age_seconds: int = 900,
 ) -> list[dict[str, Any]]:
-    """Return fresh eligible candidates with no refinement for this exact content."""
     ensure_refiner_schema(con)
     scan_limit = max(10, min(100, max(1, int(limit)) * 20))
     rows = recent_near_miss_rows(
@@ -60,10 +50,8 @@ def pending_candidate_rows(
     for item in rows:
         existing = con.execute(
             """
-            SELECT 1
-            FROM job_candidate_refinements
-            WHERE room=? AND job_id=? AND content_hash=?
-            LIMIT 1
+            SELECT 1 FROM job_candidate_refinements
+            WHERE room=? AND job_id=? AND content_hash=? LIMIT 1
             """,
             (str(item["room"]), str(item["job_id"]), str(item["content_hash"])),
         ).fetchone()
@@ -97,7 +85,6 @@ def run_once(
     llm_factory: Callable[[dict[str, Any]], Any] | None = None,
     gate_evaluator: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Refine at most ``limit`` new candidates, loading the LLM only when needed."""
     ensure_refiner_schema(con)
     candidates = pending_candidate_rows(
         con,
@@ -201,13 +188,29 @@ def shadow_canary_for_summary(
     room: str = "kibble",
     observer: Callable[..., dict[str, Any]] = shadow_observe_candidate,
 ) -> dict[str, Any] | None:
-    """Record one READY candidate as a read-only Shadow CANARY observation."""
     if not bool(summary.get("ready")):
         return None
     job_id = str(summary.get("ready_job_id", ""))
     if not job_id:
         return None
     return observer(con, cfg, job_id, room=room)
+
+
+def autonomy_for_shadow(
+    con: Any,
+    cfg: dict[str, Any],
+    shadow: dict[str, Any] | None,
+    *,
+    room: str = "kibble",
+    reviewer: Callable[..., dict[str, Any]] = review_shadow_candidate,
+) -> dict[str, Any] | None:
+    """Run the second local gate only for strict Shadow CANARY eligible rows."""
+    if not shadow or str(shadow.get("state")) != "SHADOW_ELIGIBLE":
+        return None
+    job_id = str(shadow.get("job_id", ""))
+    if not job_id:
+        return None
+    return reviewer(con, cfg, job_id, room=room)
 
 
 def print_summary(summary: dict[str, Any]) -> None:
@@ -226,10 +229,7 @@ def print_summary(summary: dict[str, Any]) -> None:
             )
         print(line)
     if summary["ready"]:
-        print(
-            f"READY candidate={summary['ready_job_id']} — evidence only; "
-            "no CLAIM was sent."
-        )
+        print(f"READY candidate={summary['ready_job_id']} — evidence only; no CLAIM was sent.")
     print("NOTE: this watcher is read-only against Technocore and never claims work.")
 
 
@@ -260,6 +260,16 @@ def main() -> None:
             )
             if shadow.get("reason"):
                 print(f"  reason={shadow['reason']}")
+
+        autonomy = autonomy_for_shadow(con, cfg, shadow, room=room)
+        if autonomy:
+            print(
+                f"Shadow Autonomy | job={autonomy.get('job_id','')} "
+                f"decision={autonomy.get('state','NEEDS_HUMAN')} "
+                f"conf={autonomy.get('confidence',0)}"
+            )
+            if autonomy.get("reason"):
+                print(f"  reason={autonomy['reason']}")
 
         auto = run_auto_once(
             con,
