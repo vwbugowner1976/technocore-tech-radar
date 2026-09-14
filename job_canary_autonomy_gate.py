@@ -47,6 +47,16 @@ AUTO_SAFE is intentionally strict. Use AUTO_SAFE only when:
   signal, component, metric, or historical fact already exists;
 - ambiguity would not materially change the answer.
 
+Important distinction: observation/health mechanisms are not automatically
+flow-control mechanisms. A liveness probe, readiness probe, health check, metric,
+log, trace, alert, or monitor can observe failure or pressure, but it does not by
+itself propagate backpressure to upstream producers. If the JOB asks how such an
+observer "communicates congestion upstream" or how producers throttle, AUTO_SAFE
+requires the JOB itself to state an actual propagation/control mechanism (for
+example a bounded queue that blocks/rejects producers, credits/semaphores, pausing
+reads, pull-based demand, or rate limiting). Do not invent that mechanism from
+general knowledge.
+
 Use NEEDS_HUMAN when the wording presupposes a hidden/unstated mechanism, asks how
 something signals/behaves without defining the relevant mechanism, requires choosing
 between environment-specific alternatives, or would tempt the answer to fabricate
@@ -55,6 +65,59 @@ specific facts in order to sound complete. When uncertain, choose NEEDS_HUMAN.
 Return JSON only:
 {"decision":"AUTO_SAFE|NEEDS_HUMAN","confidence":0-100,"reason":"brief reason"}
 """.strip()
+
+_OBSERVER_ONLY_TERMS = (
+    "liveness probe",
+    "readiness probe",
+    "health probe",
+    "health check",
+    "healthcheck",
+    "metric",
+    "metrics",
+    "log",
+    "logging",
+    "trace",
+    "tracing",
+    "alert",
+    "monitor",
+    "monitoring",
+)
+
+_FLOW_REQUEST_TERMS = (
+    "backpressure",
+    "flow control",
+    "communicates congestion upstream",
+    "communicate congestion upstream",
+    "congestion upstream",
+    "upstream producers must throttle",
+    "upstream producer must throttle",
+    "throttle upstream",
+)
+
+_EXPLICIT_PROPAGATION_TERMS = (
+    "bounded queue",
+    "blocking queue",
+    "queue blocks",
+    "queue rejects",
+    "enqueue blocks",
+    "enqueue rejects",
+    "blocks producers",
+    "blocks the producer",
+    "rejects producers",
+    "reject the producer",
+    "credit",
+    "credits",
+    "semaphore",
+    "pause reads",
+    "pausing reads",
+    "pull-based",
+    "rate limit",
+    "rate-limit",
+    "producer waits",
+    "producers wait",
+    "producer must wait",
+    "producers must wait",
+)
 
 
 def ensure_autonomy_schema(con: Any) -> None:
@@ -73,6 +136,24 @@ def normalize_autonomy(raw: dict[str, Any]) -> dict[str, Any]:
     return {"decision": decision, "confidence": confidence, "reason": reason}
 
 
+def autonomy_precheck(job: dict[str, Any]) -> dict[str, Any] | None:
+    """Fail closed when an observer is mistaken for an unstated control path."""
+    text = f"{job.get('title','')} {job.get('body','')}".lower()
+    observer = any(term in text for term in _OBSERVER_ONLY_TERMS)
+    asks_for_flow = any(term in text for term in _FLOW_REQUEST_TERMS)
+    explicit_path = any(term in text for term in _EXPLICIT_PROPAGATION_TERMS)
+    if observer and asks_for_flow and not explicit_path:
+        return {
+            "decision": "NEEDS_HUMAN",
+            "confidence": 100,
+            "reason": (
+                "JOB asks an observation/health mechanism to explain upstream flow control "
+                "but does not state a concrete backpressure propagation mechanism"
+            ),
+        }
+    return None
+
+
 def review_autonomy(
     cfg: dict[str, Any],
     llm: Any,
@@ -81,6 +162,10 @@ def review_autonomy(
     *,
     caller: Callable[..., dict[str, Any]] = local_llm_json,
 ) -> dict[str, Any]:
+    deterministic = autonomy_precheck(job)
+    if deterministic is not None:
+        return deterministic
+
     raw = caller(
         cfg,
         llm,
@@ -130,6 +215,31 @@ def store_autonomy_review(
     con.commit()
 
 
+def recheck_candidate_loader(
+    con: Any,
+    cfg: dict[str, Any],
+    job_id: str,
+    *,
+    room: str = "kibble",
+) -> tuple[dict[str, Any] | None, str]:
+    """Load a previously SHADOW_ELIGIBLE row without enforcing refinement age."""
+    row = con.execute(
+        """
+        SELECT j.room,j.job_id,j.job_seq,j.issuer_did,j.job_type,j.content_hash
+        FROM job_shadow_candidates AS j
+        JOIN job_canary_shadow_observations AS s
+          ON s.room=j.room AND s.job_id=j.job_id AND s.content_hash=j.content_hash
+        WHERE j.room=? AND j.job_id=? AND s.verdict='SHADOW_ELIGIBLE'
+        ORDER BY s.observed_at DESC
+        LIMIT 1
+        """,
+        (str(room), str(job_id)),
+    ).fetchone()
+    if row is None:
+        return None, "no SHADOW_ELIGIBLE candidate exists for recheck"
+    return {key: row[key] for key in row.keys()}, "eligible-for-read-only-recheck"
+
+
 def review_shadow_candidate(
     con: Any,
     cfg: dict[str, Any],
@@ -165,6 +275,17 @@ def review_shadow_candidate(
             "state": result["decision"],
             "confidence": result["confidence"],
             "reason": result["reason"],
+            "job_id": job_id,
+            "recorded": True,
+        }
+
+    deterministic = autonomy_precheck(exact["job"])
+    if deterministic is not None:
+        store_autonomy_review(con, candidate, deterministic)
+        return {
+            "state": deterministic["decision"],
+            "confidence": deterministic["confidence"],
+            "reason": deterministic["reason"],
             "job_id": job_id,
             "recorded": True,
         }
@@ -270,6 +391,8 @@ def main() -> None:
     pending.add_argument("--limit", type=int, default=5)
     status = sub.add_parser("status")
     status.add_argument("--limit", type=int, default=10)
+    recheck = sub.add_parser("recheck")
+    recheck.add_argument("job_id")
     args = parser.parse_args()
 
     cfg = _runtime_defaults(load_config(args.config))
@@ -280,10 +403,18 @@ def main() -> None:
             results = review_pending(con, cfg, room=room, limit=args.limit)
             print(f"Shadow Autonomy Review | reviewed={len(results)}")
             for item in results:
-                print(
-                    f"  {item['job_id']} {item['state']} conf={item['confidence']}"
-                )
+                print(f"  {item['job_id']} {item['state']} conf={item['confidence']}")
                 print(f"    reason={item['reason']}")
+        elif args.command == "recheck":
+            item = review_shadow_candidate(
+                con,
+                cfg,
+                args.job_id,
+                room=room,
+                candidate_loader=recheck_candidate_loader,
+            )
+            print(f"Shadow Autonomy Recheck | job={item['job_id']} {item['state']} conf={item['confidence']}")
+            print(f"  reason={item['reason']}")
         else:
             summary = autonomy_summary(con, room=room, limit=args.limit)
             print(
@@ -291,9 +422,7 @@ def main() -> None:
                 f"auto_safe={summary['auto_safe']} needs_human={summary['needs_human']}"
             )
             for row in summary["rows"]:
-                print(
-                    f"  {row['job_id']} {row['decision']} conf={row['confidence']}"
-                )
+                print(f"  {row['job_id']} {row['decision']} conf={row['confidence']}")
                 print(f"    reason={row['reason']}")
     finally:
         con.close()
