@@ -146,7 +146,7 @@ def candidate_policy(cfg: dict[str, Any], prepared: dict[str, Any]) -> dict[str,
     allowed_types = set(SELF_CONTAINED_TYPES) if not isinstance(allowed, list) or not allowed else {str(x).strip().lower() for x in allowed if str(x).strip()}
     checks = (
         (str(candidate.get('job_type','')) in allowed_types, 'job type is not canary self-contained'),
-        (str(candidate.get('deterministic_class','')) == 'FIT', 'deterministic class is not FIT'),
+        (str(candidate.get('deterministic_class','')) in {'FIT','NOT_RELEVANT'}, 'deterministic class is not claim-trial eligible'),
         (str(candidate.get('refined_effort','')) in {'tiny','small'}, 'refined effort is not tiny/small'),
         (int(candidate.get('refined_relevance',0)) >= int(cfg.get('job_canary_min_relevance',80)), 'relevance below canary threshold'),
         (int(candidate.get('refined_fit',0)) >= int(cfg.get('job_canary_min_fit',90)), 'technical fit below canary threshold'),
