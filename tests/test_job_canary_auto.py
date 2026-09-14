@@ -8,6 +8,8 @@ from job_canary_auto import (
     disable_canary,
     enable_canary,
     ensure_canary_schema,
+    shadow_observe_candidate,
+    shadow_summary,
 )
 
 
@@ -23,6 +25,9 @@ class CanaryAutoTests(unittest.TestCase):
     def good_prepared(self):
         return {
             "candidate": {
+                "room": "kibble",
+                "job_id": "kabcdef0123",
+                "content_hash": "digest",
                 "job_type": "coordinate",
                 "deterministic_class": "FIT",
                 "refined_effort": "small",
@@ -84,6 +89,47 @@ class CanaryAutoTests(unittest.TestCase):
         prepared = self.good_prepared()
         prepared["job"]["body"] += " Run tests before answering."
         self.assertEqual(candidate_policy({}, prepared)["state"], "SKIP")
+
+    def test_shadow_eligible_is_recorded_without_claim_state_change(self):
+        prepared = self.good_prepared()
+        candidate = prepared["candidate"]
+
+        result = shadow_observe_candidate(
+            self.con,
+            {},
+            candidate["job_id"],
+            candidate_loader=lambda con, cfg, job_id, room: (candidate, "eligible"),
+            revalidator=lambda cfg, item: {"state": "OPEN_CONFIRMED"},
+            exact_fetcher=lambda cfg, item: {"state": "EXACT", "job": prepared["job"]},
+        )
+
+        self.assertEqual(result["state"], "SHADOW_ELIGIBLE")
+        report = shadow_summary(self.con)
+        self.assertEqual(report["total"], 1)
+        self.assertEqual(report["eligible"], 1)
+        self.assertEqual(report["skipped"], 0)
+        self.assertEqual(report["rows"][0]["job_id"], candidate["job_id"])
+        claim_count = self.con.execute("SELECT COUNT(*) AS n FROM job_claim_trials").fetchone()["n"]
+        self.assertEqual(claim_count, 0)
+
+    def test_shadow_closed_job_is_recorded_as_skip(self):
+        prepared = self.good_prepared()
+        candidate = prepared["candidate"]
+
+        result = shadow_observe_candidate(
+            self.con,
+            {},
+            candidate["job_id"],
+            candidate_loader=lambda con, cfg, job_id, room: (candidate, "eligible"),
+            revalidator=lambda cfg, item: {"state": "NOT_OPEN"},
+            exact_fetcher=lambda cfg, item: self.fail("exact fetch must not run after NOT_OPEN"),
+        )
+
+        self.assertEqual(result["state"], "SHADOW_SKIP")
+        report = shadow_summary(self.con)
+        self.assertEqual(report["total"], 1)
+        self.assertEqual(report["skipped"], 1)
+        self.assertIn("NOT_OPEN", report["rows"][0]["reason"])
 
 
 if __name__ == "__main__":
