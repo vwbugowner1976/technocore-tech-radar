@@ -222,7 +222,21 @@ def pending_shadow_rows(con: Any, *, room: str = "kibble", limit: int = 5) -> li
 def review_pending(con: Any, cfg: dict[str, Any], *, room: str = "kibble", limit: int = 5) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for row in pending_shadow_rows(con, room=room, limit=limit):
-        results.append(review_shadow_candidate(con, cfg, str(row["job_id"]), room=room))
+        item = review_shadow_candidate(con, cfg, str(row["job_id"]), room=room)
+        if not bool(item.get("recorded")):
+            fallback = {
+                "room": str(row["room"]),
+                "job_id": str(row["job_id"]),
+                "content_hash": str(row["content_hash"]),
+            }
+            result = {
+                "decision": "NEEDS_HUMAN",
+                "confidence": int(item.get("confidence", 100)),
+                "reason": str(item.get("reason", "candidate unavailable")),
+            }
+            store_autonomy_review(con, fallback, result)
+            item["recorded"] = True
+        results.append(item)
     return results
 
 
