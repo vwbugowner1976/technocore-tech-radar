@@ -70,10 +70,17 @@ class CanaryAutoTests(unittest.TestCase):
     def test_strict_candidate_passes(self):
         self.assertEqual(candidate_policy({}, self.good_prepared())["state"], "ELIGIBLE")
 
-    def test_non_fit_candidate_is_skipped(self):
+    def test_not_relevant_can_be_semantically_rescued(self):
         prepared = self.good_prepared()
         prepared["candidate"]["deterministic_class"] = "NOT_RELEVANT"
-        self.assertEqual(candidate_policy({}, prepared)["state"], "SKIP")
+        self.assertEqual(candidate_policy({}, prepared)["state"], "ELIGIBLE")
+
+    def test_tool_class_candidate_is_skipped(self):
+        prepared = self.good_prepared()
+        prepared["candidate"]["deterministic_class"] = "NEEDS_TOOL"
+        result = candidate_policy({}, prepared)
+        self.assertEqual(result["state"], "SKIP")
+        self.assertIn("claim-trial eligible", result["reason"])
 
     def test_low_issuer_evidence_is_skipped(self):
         prepared = self.good_prepared()
