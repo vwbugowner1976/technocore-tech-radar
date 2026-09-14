@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from job_canary_auto import ensure_canary_schema
 from job_canary_autonomy_gate import (
+    autonomy_precheck,
     autonomy_summary,
     ensure_autonomy_schema,
     normalize_autonomy,
@@ -44,6 +45,34 @@ class CanaryAutonomyGateTests(unittest.TestCase):
         result = normalize_autonomy({"decision": "AUTO_SAFE", "confidence": 99, "reason": ""})
         self.assertEqual(result["decision"], "NEEDS_HUMAN")
 
+    def test_observer_only_backpressure_job_fails_deterministic_precheck(self):
+        job = {
+            "job_type": "explain",
+            "title": "Backpressure signaling across a liveness probe that checks too much boundaries",
+            "body": (
+                "Explain how a liveness probe that checks too much communicates congestion upstream "
+                "when worker queues fill up faster than processing capacity. A transient dependency "
+                "failure causes a restart loop. Success: identifies the flow control mechanism and "
+                "how upstream producers must throttle."
+            ),
+        }
+        result = autonomy_precheck(job)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["decision"], "NEEDS_HUMAN")
+        self.assertIn("does not state a concrete backpressure propagation mechanism", result["reason"])
+
+    def test_observer_job_with_explicit_control_path_is_not_deterministically_blocked(self):
+        job = {
+            "job_type": "explain",
+            "title": "Explain probe observations and queue backpressure",
+            "body": (
+                "A liveness probe observes health while a bounded queue blocks producers when full. "
+                "Explain the backpressure path and how upstream producers must throttle. "
+                "Success: identify the flow control mechanism."
+            ),
+        }
+        self.assertIsNone(autonomy_precheck(job))
+
     def test_exact_unavailable_is_needs_human_without_loading_llm(self):
         calls = {"llm": 0}
 
@@ -57,6 +86,38 @@ class CanaryAutonomyGateTests(unittest.TestCase):
             self.candidate["job_id"],
             candidate_loader=lambda con, cfg, job_id, room: (self.candidate, "eligible"),
             exact_fetcher=lambda cfg, candidate: {"state": "NOT_RETAINED"},
+            llm_factory=llm_factory,
+        )
+        self.assertEqual(result["state"], "NEEDS_HUMAN")
+        self.assertEqual(calls["llm"], 0)
+        report = autonomy_summary(self.con)
+        self.assertEqual(report["needs_human"], 1)
+
+    def test_observer_only_backpressure_blocks_before_loading_llm(self):
+        calls = {"llm": 0}
+
+        def llm_factory(cfg):
+            calls["llm"] += 1
+            return FakeLLM()
+
+        result = review_shadow_candidate(
+            self.con,
+            {"research_model": "fake"},
+            self.candidate["job_id"],
+            candidate_loader=lambda con, cfg, job_id, room: (self.candidate, "eligible"),
+            exact_fetcher=lambda cfg, candidate: {
+                "state": "EXACT",
+                "job": {
+                    "job_type": "explain",
+                    "title": "Backpressure signaling across a liveness probe that checks too much boundaries",
+                    "body": (
+                        "Explain how a liveness probe that checks too much communicates congestion upstream "
+                        "when worker queues fill up faster than processing capacity. A transient dependency "
+                        "failure causes a restart loop. Success: identifies the flow control mechanism and "
+                        "how upstream producers must throttle."
+                    ),
+                },
+            },
             llm_factory=llm_factory,
         )
         self.assertEqual(result["state"], "NEEDS_HUMAN")
