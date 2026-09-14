@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import re
-from typing import Any
+from typing import Any, Callable
 
 from job_auto_orchestrator import ensure_auto_schema
-from job_candidate_refiner import _runtime_defaults
+from job_candidate_refiner import _runtime_defaults, fetch_exact_job
+from job_claim_trial import candidate_for_claim
+from job_live_revalidator import live_revalidate_job_export_aware
 from job_shadow_policy import SELF_CONTAINED_TYPES, TOOL_HINTS
 from technoscout.common import utc_now
 from technoscout.db import connect
@@ -34,6 +36,25 @@ CREATE TABLE IF NOT EXISTS job_canary_auto_runs (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(room,job_id,content_hash)
 );
+CREATE TABLE IF NOT EXISTS job_canary_shadow_observations (
+    room TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    job_type TEXT NOT NULL DEFAULT '',
+    relevance INTEGER NOT NULL DEFAULT 0,
+    technical_fit INTEGER NOT NULL DEFAULT 0,
+    confidence INTEGER NOT NULL DEFAULT 0,
+    issuer_score INTEGER NOT NULL DEFAULT 0,
+    attested_jobs INTEGER NOT NULL DEFAULT 0,
+    completion_rate_percent INTEGER NOT NULL DEFAULT 0,
+    live_state TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL,
+    PRIMARY KEY(room,job_id,content_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_job_canary_shadow_observed
+    ON job_canary_shadow_observations(observed_at DESC);
 """
 
 _URL_RE = re.compile(r"https?://|www\.", re.I)
@@ -150,6 +171,110 @@ def candidate_policy(cfg: dict[str, Any], prepared: dict[str, Any]) -> dict[str,
     return {'state':'ELIGIBLE','reason':''}
 
 
+def _store_shadow(
+    con: Any,
+    candidate: dict[str, Any],
+    *,
+    verdict: str,
+    reason: str,
+    live_state: str,
+) -> None:
+    ensure_canary_schema(con)
+    rep = candidate.get('issuer_reputation') or {}
+    con.execute(
+        """
+        INSERT INTO job_canary_shadow_observations(
+          room,job_id,content_hash,verdict,reason,job_type,relevance,technical_fit,
+          confidence,issuer_score,attested_jobs,completion_rate_percent,live_state,observed_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(room,job_id,content_hash) DO UPDATE SET
+          verdict=excluded.verdict,reason=excluded.reason,job_type=excluded.job_type,
+          relevance=excluded.relevance,technical_fit=excluded.technical_fit,
+          confidence=excluded.confidence,issuer_score=excluded.issuer_score,
+          attested_jobs=excluded.attested_jobs,
+          completion_rate_percent=excluded.completion_rate_percent,
+          live_state=excluded.live_state,observed_at=excluded.observed_at
+        """,
+        (
+            str(candidate.get('room','kibble')), str(candidate.get('job_id','')),
+            str(candidate.get('content_hash','')), str(verdict), str(reason)[:500],
+            str(candidate.get('job_type','')), int(candidate.get('refined_relevance',0)),
+            int(candidate.get('refined_fit',0)), int(candidate.get('refined_confidence',0)),
+            int(rep.get('score',0)), int(rep.get('attested_jobs',0)),
+            int(rep.get('completion_rate_percent',0)), str(live_state), utc_now(),
+        ),
+    )
+    con.commit()
+
+
+def shadow_observe_candidate(
+    con: Any,
+    cfg: dict[str, Any],
+    job_id: str,
+    *,
+    room: str = 'kibble',
+    candidate_loader: Callable[..., tuple[dict[str, Any] | None, str]] = candidate_for_claim,
+    exact_fetcher: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = fetch_exact_job,
+    revalidator: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = live_revalidate_job_export_aware,
+) -> dict[str, Any]:
+    """READ-only shadow decision. It never prepares, approves, claims, or delivers."""
+    ensure_canary_schema(con)
+    candidate, reason = candidate_loader(con, cfg, job_id, room=room)
+    if candidate is None:
+        return {'state':'SHADOW_SKIP','reason':str(reason),'recorded':False,'job_id':job_id}
+
+    live = revalidator(cfg, candidate)
+    live_state = str(live.get('state','UNKNOWN'))
+    if live_state != 'OPEN_CONFIRMED':
+        reason = f'live OPEN check failed: {live_state}'
+        _store_shadow(con, candidate, verdict='SHADOW_SKIP', reason=reason, live_state=live_state)
+        return {'state':'SHADOW_SKIP','reason':reason,'recorded':True,'job_id':job_id}
+
+    exact = exact_fetcher(cfg, candidate)
+    exact_state = str(exact.get('state','UNKNOWN'))
+    if exact_state != 'EXACT':
+        reason = f'exact JOB fetch failed: {exact_state}'
+        _store_shadow(con, candidate, verdict='SHADOW_SKIP', reason=reason, live_state=live_state)
+        return {'state':'SHADOW_SKIP','reason':reason,'recorded':True,'job_id':job_id}
+
+    policy = candidate_policy(cfg, {'candidate': candidate, 'job': exact.get('job') or {}})
+    verdict = 'SHADOW_ELIGIBLE' if policy.get('state') == 'ELIGIBLE' else 'SHADOW_SKIP'
+    reason = str(policy.get('reason') or ('strict canary policy would accept' if verdict == 'SHADOW_ELIGIBLE' else 'policy rejected'))
+    _store_shadow(con, candidate, verdict=verdict, reason=reason, live_state=live_state)
+    return {
+        'state': verdict,
+        'reason': reason,
+        'recorded': True,
+        'job_id': str(candidate.get('job_id',job_id)),
+        'content_hash': str(candidate.get('content_hash','')),
+    }
+
+
+def shadow_summary(con: Any, *, room: str = 'kibble', limit: int = 10) -> dict[str, Any]:
+    ensure_canary_schema(con)
+    total = con.execute(
+        "SELECT COUNT(*) AS n FROM job_canary_shadow_observations WHERE room=?",
+        (str(room),),
+    ).fetchone()
+    eligible = con.execute(
+        "SELECT COUNT(*) AS n FROM job_canary_shadow_observations WHERE room=? AND verdict='SHADOW_ELIGIBLE'",
+        (str(room),),
+    ).fetchone()
+    rows = con.execute(
+        """
+        SELECT * FROM job_canary_shadow_observations
+        WHERE room=? ORDER BY observed_at DESC LIMIT ?
+        """,
+        (str(room), max(1, min(50, int(limit)))),
+    ).fetchall()
+    return {
+        'total': int(total['n'] or 0),
+        'eligible': int(eligible['n'] or 0),
+        'skipped': int(total['n'] or 0) - int(eligible['n'] or 0),
+        'rows': [{key: row[key] for key in row.keys()} for row in rows],
+    }
+
+
 def delivery_policy(cfg: dict[str, Any], result: dict[str, Any]) -> dict[str, str]:
     if result.get('state') != 'READY_FOR_HUMAN_DELIVERY':
         return {'state':'BLOCK','reason':'post-claim pipeline did not reach delivery-ready'}
@@ -187,15 +312,33 @@ def main() -> None:
     sub = parser.add_subparsers(dest='command', required=True)
     p = sub.add_parser('enable'); p.add_argument('--budget', type=int, default=1)
     sub.add_parser('disable'); sub.add_parser('status')
+    shadow = sub.add_parser('shadow-status'); shadow.add_argument('--limit', type=int, default=10)
     args = parser.parse_args()
     cfg = _runtime_defaults(load_config(args.config))
     con = connect(database_path(cfg))
     try:
-        if args.command == 'enable': status = enable_canary(con,args.budget)
-        elif args.command == 'disable': status = disable_canary(con)
-        else: status = canary_status(con)
-        print(f"Canary Auto | mode={status['mode']} remaining={status['remaining_successes']} total_successes={status['total_successes']} last_job={status['last_job_id'] or '-'}")
-        if status['detail']: print(f"detail={status['detail']}")
+        if args.command == 'enable':
+            status = enable_canary(con,args.budget)
+            print(f"Canary Auto | mode={status['mode']} remaining={status['remaining_successes']} total_successes={status['total_successes']} last_job={status['last_job_id'] or '-'}")
+            if status['detail']: print(f"detail={status['detail']}")
+        elif args.command == 'disable':
+            status = disable_canary(con)
+            print(f"Canary Auto | mode={status['mode']} remaining={status['remaining_successes']} total_successes={status['total_successes']} last_job={status['last_job_id'] or '-'}")
+            if status['detail']: print(f"detail={status['detail']}")
+        elif args.command == 'shadow-status':
+            summary = shadow_summary(con, room=str(cfg.get('job_shadow_room','kibble')), limit=args.limit)
+            print(f"Shadow Canary | total={summary['total']} eligible={summary['eligible']} skipped={summary['skipped']}")
+            for row in summary['rows']:
+                print(
+                    f"  {row['job_id']} {row['verdict']} type={row['job_type']} "
+                    f"rel={row['relevance']} fit={row['technical_fit']} conf={row['confidence']} "
+                    f"issuer={row['issuer_score']} attested={row['attested_jobs']} live={row['live_state']}"
+                )
+                print(f"    reason={row['reason']}")
+        else:
+            status = canary_status(con)
+            print(f"Canary Auto | mode={status['mode']} remaining={status['remaining_successes']} total_successes={status['total_successes']} last_job={status['last_job_id'] or '-'}")
+            if status['detail']: print(f"detail={status['detail']}")
     finally:
         con.close()
 
