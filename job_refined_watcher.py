@@ -11,9 +11,9 @@ This module never CLAIMs, sends, executes job content, opens job URLs, spends FL
 touches wallets/credentials, or changes TechnoScout autonomy. A SAFE_FIT result can
 only produce read-only READY evidence through the existing Refined Job Gate.
 
-The CLI entrypoint then hands that READY evidence to job_auto_orchestrator, which may
-prepare a local CLAIM preview and may process already-SENT claims locally. Neither
-module approves or sends CLAIM/DELIVER writes.
+The CLI entrypoint records a read-only Shadow CANARY verdict for READY evidence, then
+hands the READY id to job_auto_orchestrator. Shadow CANARY never approves or sends a
+CLAIM/DELIVER; the existing human boundary remains unchanged.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import argparse
 from typing import Any, Callable
 
 from job_auto_orchestrator import run_once as run_auto_once
+from job_canary_auto import shadow_observe_candidate
 from job_candidate_refiner import (
     _runtime_defaults,
     ensure_refiner_schema,
@@ -192,6 +193,23 @@ def run_once(
     return summary
 
 
+def shadow_canary_for_summary(
+    con: Any,
+    cfg: dict[str, Any],
+    summary: dict[str, Any],
+    *,
+    room: str = "kibble",
+    observer: Callable[..., dict[str, Any]] = shadow_observe_candidate,
+) -> dict[str, Any] | None:
+    """Record one READY candidate as a read-only Shadow CANARY observation."""
+    if not bool(summary.get("ready")):
+        return None
+    job_id = str(summary.get("ready_job_id", ""))
+    if not job_id:
+        return None
+    return observer(con, cfg, job_id, room=room)
+
+
 def print_summary(summary: dict[str, Any]) -> None:
     print(
         "Job Refined Watch | "
@@ -233,11 +251,21 @@ def main() -> None:
         )
         print_summary(summary)
 
+        room = str(cfg.get("job_shadow_room", "kibble"))
+        shadow = shadow_canary_for_summary(con, cfg, summary, room=room)
+        if shadow:
+            print(
+                f"Shadow Canary | job={shadow.get('job_id','')} "
+                f"verdict={shadow.get('state','UNKNOWN')}"
+            )
+            if shadow.get("reason"):
+                print(f"  reason={shadow['reason']}")
+
         auto = run_auto_once(
             con,
             cfg,
             ready_job_id=str(summary["ready_job_id"] if summary["ready"] else ""),
-            room=str(cfg.get("job_shadow_room", "kibble")),
+            room=room,
             limit=2,
         )
         prepared = auto.get("prepared")
