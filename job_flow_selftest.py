@@ -15,6 +15,7 @@ TESTS = [
     "tests.test_job_claim_terminal_flow",
     "tests.test_job_canary_auto",
     "tests.test_job_canary_shadow_review",
+    "tests.test_job_canary_autonomy_gate",
     "tests.test_job_refined_watcher",
     "tests.test_job_gpu_semantic_repair",
     "tests.test_job_success_named_proof",
@@ -28,7 +29,7 @@ TESTS = [
 def main() -> int:
     print("=== TechnoScout JOB FLOW SELFTEST ===")
     print("LOCAL ONLY: no network, no CLAIM, no DELIVER, no signed write")
-    print("fixtures=shared-GPU + fidelity + stale-CLAIM + canary-policy + shadow-canary regressions")
+    print("fixtures=shared-GPU + fidelity + stale-CLAIM + canary-policy + shadow/autonomy regressions")
 
     suite = unittest.defaultTestLoader.loadTestsFromNames(TESTS)
     result = unittest.TextTestRunner(verbosity=1).run(suite)
@@ -38,7 +39,7 @@ def main() -> int:
         return 1
 
     print("SELFTEST PASS — local flow and safety guards are ready")
-    print("Shadow CANARY records read-only decisions; signed CLAIM/DELIVER still require human confirmation.")
+    print("Shadow CANARY + autonomy gates are read-only; signed CLAIM/DELIVER still require human confirmation.")
     return 0
 
 
