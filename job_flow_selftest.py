@@ -14,6 +14,7 @@ TESTS = [
     "tests.test_job_grounding_bridge",
     "tests.test_job_claim_terminal_flow",
     "tests.test_job_canary_auto",
+    "tests.test_job_canary_shadow_review",
     "tests.test_job_refined_watcher",
     "tests.test_job_gpu_semantic_repair",
     "tests.test_job_success_named_proof",
