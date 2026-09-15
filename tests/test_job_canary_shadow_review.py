@@ -2,6 +2,7 @@ import sqlite3
 import unittest
 
 from job_canary_auto import ensure_canary_schema
+from job_canary_autonomy_gate import ensure_autonomy_schema
 from job_canary_shadow_review import review_shadow_eligible
 from job_candidate_refiner import ensure_refiner_schema
 from job_shadow import ensure_job_shadow_schema
@@ -14,6 +15,7 @@ class ShadowCanaryReviewTests(unittest.TestCase):
         ensure_job_shadow_schema(self.con)
         ensure_refiner_schema(self.con)
         ensure_canary_schema(self.con)
+        ensure_autonomy_schema(self.con)
         self.con.execute(
             """
             INSERT INTO job_shadow_candidates(
@@ -62,6 +64,41 @@ class ShadowCanaryReviewTests(unittest.TestCase):
         self.assertEqual(rows[0]["job"]["title"], "A title")
         claim_count = self.con.execute("SELECT COUNT(*) AS n FROM job_claim_trials").fetchone()["n"]
         self.assertEqual(claim_count, 0)
+
+    def test_auto_safe_filter_tracks_current_autonomy_decision(self):
+        self.con.execute(
+            """
+            INSERT INTO job_canary_autonomy_reviews(
+              room,job_id,content_hash,decision,confidence,reason,reviewed_at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            ("kibble","kabcdef0123","digest","AUTO_SAFE",100,"fixture","now"),
+        )
+        self.con.commit()
+
+        rows = review_shadow_eligible(
+            self.con,
+            {},
+            auto_safe_only=True,
+            exact_fetcher=lambda cfg, candidate: {
+                "state": "EXACT",
+                "job": {"title": "Safe", "body": "Success: clear."},
+            },
+        )
+        self.assertEqual([row["job_id"] for row in rows], ["kabcdef0123"])
+
+        self.con.execute(
+            "UPDATE job_canary_autonomy_reviews SET decision='NEEDS_HUMAN' WHERE job_id=?",
+            ("kabcdef0123",),
+        )
+        self.con.commit()
+        rows = review_shadow_eligible(
+            self.con,
+            {},
+            auto_safe_only=True,
+            exact_fetcher=lambda cfg, candidate: self.fail("no exact fetch expected"),
+        )
+        self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":
