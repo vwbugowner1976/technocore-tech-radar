@@ -9,6 +9,7 @@ from typing import Any, Callable
 from job_candidate_refiner import _runtime_defaults, fetch_exact_job
 from job_canary_auto import ensure_canary_schema
 from job_canary_autonomy_gate import ensure_autonomy_schema
+from job_canary_autonomy_snapshot import load_autonomy_snapshot, store_autonomy_snapshot
 from technoscout.db import connect
 from technoscout_cli import database_path, load_config
 
@@ -58,7 +59,7 @@ def review_shadow_eligible(
     auto_safe_only: bool = False,
     exact_fetcher: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = fetch_exact_job,
 ) -> list[dict[str, Any]]:
-    """Fetch exact retained JOB records for human audit; never signs or writes network state."""
+    """Audit immutable local snapshots first; use live exact fetch only for legacy rows."""
     results: list[dict[str, Any]] = []
     for candidate in recent_eligible_candidates(
         con,
@@ -66,21 +67,55 @@ def review_shadow_eligible(
         limit=limit,
         auto_safe_only=auto_safe_only,
     ):
+        snapshot = load_autonomy_snapshot(con, candidate)
+        snapshot_state = str(snapshot.get("state", "UNKNOWN"))
+        if snapshot_state == "EXACT":
+            results.append({
+                "job_id": candidate["job_id"],
+                "state": "EXACT",
+                "source": "SNAPSHOT",
+                "candidate": candidate,
+                "job": snapshot.get("job"),
+            })
+            continue
+        if snapshot_state not in {"SNAPSHOT_NOT_FOUND"}:
+            results.append({
+                "job_id": candidate["job_id"],
+                "state": snapshot_state,
+                "source": "SNAPSHOT",
+                "candidate": candidate,
+            })
+            continue
+
         try:
             exact = exact_fetcher(cfg, candidate)
         except Exception as exc:
             results.append({
                 "job_id": candidate["job_id"],
                 "state": f"ERROR:{type(exc).__name__}",
+                "source": "LIVE",
                 "candidate": candidate,
             })
             continue
+
         state = str(exact.get("state", "UNKNOWN"))
+        job = exact.get("job") if state == "EXACT" else None
+        if state == "EXACT" and isinstance(job, dict):
+            stored = store_autonomy_snapshot(con, candidate, job)
+            if stored.get("state") == "SNAPSHOT_CONFLICT":
+                results.append({
+                    "job_id": candidate["job_id"],
+                    "state": "SNAPSHOT_CONFLICT",
+                    "source": "LIVE",
+                    "candidate": candidate,
+                })
+                continue
         results.append({
             "job_id": candidate["job_id"],
             "state": state,
+            "source": "LIVE",
             "candidate": candidate,
-            "job": exact.get("job") if state == "EXACT" else None,
+            "job": job,
         })
     return results
 
@@ -117,9 +152,10 @@ def main() -> None:
     for item in rows:
         candidate = item["candidate"]
         print(
-            f"\n=== {item['job_id']} state={item['state']} type={candidate['job_type']} "
-            f"rel={candidate['relevance']} fit={candidate['technical_fit']} "
-            f"conf={candidate['confidence']} issuer={candidate['issuer_score']} ==="
+            f"\n=== {item['job_id']} state={item['state']} source={item.get('source','?')} "
+            f"type={candidate['job_type']} rel={candidate['relevance']} "
+            f"fit={candidate['technical_fit']} conf={candidate['confidence']} "
+            f"issuer={candidate['issuer_score']} ==="
         )
         job = item.get("job")
         if not isinstance(job, dict):
