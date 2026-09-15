@@ -16,6 +16,7 @@ TESTS = [
     "tests.test_job_canary_auto",
     "tests.test_job_canary_shadow_review",
     "tests.test_job_canary_autonomy_gate",
+    "tests.test_job_canary_autonomy_snapshot",
     "tests.test_job_refined_watcher",
     "tests.test_job_gpu_semantic_repair",
     "tests.test_job_success_named_proof",
@@ -29,7 +30,7 @@ TESTS = [
 def main() -> int:
     print("=== TechnoScout JOB FLOW SELFTEST ===")
     print("LOCAL ONLY: no network, no CLAIM, no DELIVER, no signed write")
-    print("fixtures=shared-GPU + fidelity + stale-CLAIM + canary-policy + shadow/autonomy regressions")
+    print("fixtures=shared-GPU + fidelity + stale-CLAIM + canary-policy + shadow/autonomy/snapshot regressions")
 
     suite = unittest.defaultTestLoader.loadTestsFromNames(TESTS)
     result = unittest.TextTestRunner(verbosity=1).run(suite)
