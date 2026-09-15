@@ -7,6 +7,7 @@ import argparse
 from typing import Any, Callable
 
 from job_candidate_refiner import _runtime_defaults, fetch_exact_job
+from job_canary_autonomy_snapshot import store_autonomy_snapshot
 from job_claim_trial import candidate_for_claim
 from technoscout.common import clamp_score, local_llm_json, utc_now
 from technoscout.db import connect
@@ -67,56 +68,20 @@ Return JSON only:
 """.strip()
 
 _OBSERVER_ONLY_TERMS = (
-    "liveness probe",
-    "readiness probe",
-    "health probe",
-    "health check",
-    "healthcheck",
-    "metric",
-    "metrics",
-    "log",
-    "logging",
-    "trace",
-    "tracing",
-    "alert",
-    "monitor",
-    "monitoring",
+    "liveness probe", "readiness probe", "health probe", "health check", "healthcheck",
+    "metric", "metrics", "log", "logging", "trace", "tracing", "alert", "monitor", "monitoring",
 )
-
 _FLOW_REQUEST_TERMS = (
-    "backpressure",
-    "flow control",
-    "communicates congestion upstream",
-    "communicate congestion upstream",
-    "congestion upstream",
-    "upstream producers must throttle",
-    "upstream producer must throttle",
-    "throttle upstream",
+    "backpressure", "flow control", "communicates congestion upstream",
+    "communicate congestion upstream", "congestion upstream",
+    "upstream producers must throttle", "upstream producer must throttle", "throttle upstream",
 )
-
 _EXPLICIT_PROPAGATION_TERMS = (
-    "bounded queue",
-    "blocking queue",
-    "queue blocks",
-    "queue rejects",
-    "enqueue blocks",
-    "enqueue rejects",
-    "blocks producers",
-    "blocks the producer",
-    "rejects producers",
-    "reject the producer",
-    "credit",
-    "credits",
-    "semaphore",
-    "pause reads",
-    "pausing reads",
-    "pull-based",
-    "rate limit",
-    "rate-limit",
-    "producer waits",
-    "producers wait",
-    "producer must wait",
-    "producers must wait",
+    "bounded queue", "blocking queue", "queue blocks", "queue rejects", "enqueue blocks",
+    "enqueue rejects", "blocks producers", "blocks the producer", "rejects producers",
+    "reject the producer", "credit", "credits", "semaphore", "pause reads", "pausing reads",
+    "pull-based", "rate limit", "rate-limit", "producer waits", "producers wait",
+    "producer must wait", "producers must wait",
 )
 
 
@@ -137,7 +102,6 @@ def normalize_autonomy(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def autonomy_precheck(job: dict[str, Any]) -> dict[str, Any] | None:
-    """Fail closed when an observer is mistaken for an unstated control path."""
     text = f"{job.get('title','')} {job.get('body','')}".lower()
     observer = any(term in text for term in _OBSERVER_ONLY_TERMS)
     asks_for_flow = any(term in text for term in _FLOW_REQUEST_TERMS)
@@ -165,7 +129,6 @@ def review_autonomy(
     deterministic = autonomy_precheck(job)
     if deterministic is not None:
         return deterministic
-
     raw = caller(
         cfg,
         llm,
@@ -185,11 +148,7 @@ def review_autonomy(
     return normalize_autonomy(raw)
 
 
-def store_autonomy_review(
-    con: Any,
-    candidate: dict[str, Any],
-    result: dict[str, Any],
-) -> None:
+def store_autonomy_review(con: Any, candidate: dict[str, Any], result: dict[str, Any]) -> None:
     ensure_autonomy_schema(con)
     con.execute(
         """
@@ -197,32 +156,21 @@ def store_autonomy_review(
           room,job_id,content_hash,decision,confidence,reason,reviewed_at
         ) VALUES(?,?,?,?,?,?,?)
         ON CONFLICT(room,job_id,content_hash) DO UPDATE SET
-          decision=excluded.decision,
-          confidence=excluded.confidence,
-          reason=excluded.reason,
-          reviewed_at=excluded.reviewed_at
+          decision=excluded.decision,confidence=excluded.confidence,
+          reason=excluded.reason,reviewed_at=excluded.reviewed_at
         """,
         (
-            str(candidate.get("room", "kibble")),
-            str(candidate.get("job_id", "")),
-            str(candidate.get("content_hash", "")),
-            str(result.get("decision", "NEEDS_HUMAN")),
-            int(result.get("confidence", 0)),
-            str(result.get("reason", ""))[:500],
-            utc_now(),
+            str(candidate.get("room", "kibble")), str(candidate.get("job_id", "")),
+            str(candidate.get("content_hash", "")), str(result.get("decision", "NEEDS_HUMAN")),
+            int(result.get("confidence", 0)), str(result.get("reason", ""))[:500], utc_now(),
         ),
     )
     con.commit()
 
 
 def recheck_candidate_loader(
-    con: Any,
-    cfg: dict[str, Any],
-    job_id: str,
-    *,
-    room: str = "kibble",
+    con: Any, cfg: dict[str, Any], job_id: str, *, room: str = "kibble"
 ) -> tuple[dict[str, Any] | None, str]:
-    """Load a previously SHADOW_ELIGIBLE row without enforcing refinement age."""
     row = con.execute(
         """
         SELECT j.room,j.job_id,j.job_seq,j.issuer_did,j.job_type,j.content_hash
@@ -230,14 +178,24 @@ def recheck_candidate_loader(
         JOIN job_canary_shadow_observations AS s
           ON s.room=j.room AND s.job_id=j.job_id AND s.content_hash=j.content_hash
         WHERE j.room=? AND j.job_id=? AND s.verdict='SHADOW_ELIGIBLE'
-        ORDER BY s.observed_at DESC
-        LIMIT 1
+        ORDER BY s.observed_at DESC LIMIT 1
         """,
         (str(room), str(job_id)),
     ).fetchone()
     if row is None:
         return None, "no SHADOW_ELIGIBLE candidate exists for recheck"
     return {key: row[key] for key in row.keys()}, "eligible-for-read-only-recheck"
+
+
+def _record_needs_human(
+    con: Any, candidate: dict[str, Any], job_id: str, reason: str, confidence: int = 100
+) -> dict[str, Any]:
+    result = {"decision": "NEEDS_HUMAN", "confidence": confidence, "reason": reason}
+    store_autonomy_review(con, candidate, result)
+    return {
+        "state": "NEEDS_HUMAN", "confidence": confidence, "reason": reason,
+        "job_id": job_id, "recorded": True,
+    }
 
 
 def review_shadow_candidate(
@@ -255,58 +213,46 @@ def review_shadow_candidate(
     candidate, reason = candidate_loader(con, cfg, job_id, room=room)
     if candidate is None:
         return {
-            "state": "NEEDS_HUMAN",
-            "confidence": 100,
-            "reason": f"candidate unavailable: {reason}",
-            "job_id": job_id,
-            "recorded": False,
+            "state": "NEEDS_HUMAN", "confidence": 100,
+            "reason": f"candidate unavailable: {reason}", "job_id": job_id, "recorded": False,
         }
 
-    exact = exact_fetcher(cfg, candidate)
+    try:
+        exact = exact_fetcher(cfg, candidate)
+    except Exception as exc:
+        return _record_needs_human(
+            con, candidate, job_id, f"exact JOB autonomy fetch failed closed: {type(exc).__name__}"
+        )
     exact_state = str(exact.get("state", "UNKNOWN"))
     if exact_state != "EXACT":
-        result = {
-            "decision": "NEEDS_HUMAN",
-            "confidence": 100,
-            "reason": f"exact JOB unavailable for autonomy review: {exact_state}",
-        }
-        store_autonomy_review(con, candidate, result)
-        return {
-            "state": result["decision"],
-            "confidence": result["confidence"],
-            "reason": result["reason"],
-            "job_id": job_id,
-            "recorded": True,
-        }
+        return _record_needs_human(
+            con, candidate, job_id, f"exact JOB unavailable for autonomy review: {exact_state}"
+        )
+
+    snapshot = store_autonomy_snapshot(con, candidate, exact["job"])
+    if snapshot.get("state") == "SNAPSHOT_CONFLICT":
+        return _record_needs_human(
+            con, candidate, job_id, str(snapshot.get("reason", "autonomy JOB snapshot conflict"))
+        )
 
     deterministic = autonomy_precheck(exact["job"])
     if deterministic is not None:
         store_autonomy_review(con, candidate, deterministic)
         return {
-            "state": deterministic["decision"],
-            "confidence": deterministic["confidence"],
-            "reason": deterministic["reason"],
-            "job_id": job_id,
-            "recorded": True,
+            "state": deterministic["decision"], "confidence": deterministic["confidence"],
+            "reason": deterministic["reason"], "job_id": job_id, "recorded": True,
         }
 
     model = str(cfg.get("research_model") or cfg.get("triage_model") or "").strip()
     if not model:
-        result = {
-            "decision": "NEEDS_HUMAN",
-            "confidence": 100,
-            "reason": "no configured local model for autonomy review",
-        }
-        store_autonomy_review(con, candidate, result)
-        return {"state": result["decision"], "confidence": 100, "reason": result["reason"], "job_id": job_id, "recorded": True}
+        return _record_needs_human(con, candidate, job_id, "no configured local model for autonomy review")
 
     llm = llm_factory(cfg)
     try:
         result = reviewer(cfg, llm, model, exact["job"])
     except Exception as exc:
         result = {
-            "decision": "NEEDS_HUMAN",
-            "confidence": 100,
+            "decision": "NEEDS_HUMAN", "confidence": 100,
             "reason": f"autonomy review failed closed: {type(exc).__name__}",
         }
     finally:
@@ -315,11 +261,8 @@ def review_shadow_candidate(
     result = normalize_autonomy(result)
     store_autonomy_review(con, candidate, result)
     return {
-        "state": result["decision"],
-        "confidence": result["confidence"],
-        "reason": result["reason"],
-        "job_id": job_id,
-        "recorded": True,
+        "state": result["decision"], "confidence": result["confidence"],
+        "reason": result["reason"], "job_id": job_id, "recorded": True,
     }
 
 
@@ -332,8 +275,7 @@ def pending_shadow_rows(con: Any, *, room: str = "kibble", limit: int = 5) -> li
         LEFT JOIN job_canary_autonomy_reviews AS a
           ON a.room=s.room AND a.job_id=s.job_id AND a.content_hash=s.content_hash
         WHERE s.room=? AND s.verdict='SHADOW_ELIGIBLE' AND a.job_id IS NULL
-        ORDER BY s.observed_at DESC
-        LIMIT ?
+        ORDER BY s.observed_at DESC LIMIT ?
         """,
         (str(room), max(1, min(20, int(limit)))),
     ).fetchall()
@@ -346,16 +288,18 @@ def review_pending(con: Any, cfg: dict[str, Any], *, room: str = "kibble", limit
         item = review_shadow_candidate(con, cfg, str(row["job_id"]), room=room)
         if not bool(item.get("recorded")):
             fallback = {
-                "room": str(row["room"]),
-                "job_id": str(row["job_id"]),
+                "room": str(row["room"]), "job_id": str(row["job_id"]),
                 "content_hash": str(row["content_hash"]),
             }
-            result = {
-                "decision": "NEEDS_HUMAN",
-                "confidence": int(item.get("confidence", 100)),
-                "reason": str(item.get("reason", "candidate unavailable")),
-            }
-            store_autonomy_review(con, fallback, result)
+            store_autonomy_review(
+                con,
+                fallback,
+                {
+                    "decision": "NEEDS_HUMAN",
+                    "confidence": int(item.get("confidence", 100)),
+                    "reason": str(item.get("reason", "candidate unavailable")),
+                },
+            )
             item["recorded"] = True
         results.append(item)
     return results
@@ -364,8 +308,7 @@ def review_pending(con: Any, cfg: dict[str, Any], *, room: str = "kibble", limit
 def autonomy_summary(con: Any, *, room: str = "kibble", limit: int = 10) -> dict[str, Any]:
     ensure_autonomy_schema(con)
     total = con.execute(
-        "SELECT COUNT(*) AS n FROM job_canary_autonomy_reviews WHERE room=?",
-        (str(room),),
+        "SELECT COUNT(*) AS n FROM job_canary_autonomy_reviews WHERE room=?", (str(room),)
     ).fetchone()
     safe = con.execute(
         "SELECT COUNT(*) AS n FROM job_canary_autonomy_reviews WHERE room=? AND decision='AUTO_SAFE'",
@@ -376,8 +319,7 @@ def autonomy_summary(con: Any, *, room: str = "kibble", limit: int = 10) -> dict
         (str(room), max(1, min(50, int(limit)))),
     ).fetchall()
     return {
-        "total": int(total["n"] or 0),
-        "auto_safe": int(safe["n"] or 0),
+        "total": int(total["n"] or 0), "auto_safe": int(safe["n"] or 0),
         "needs_human": int(total["n"] or 0) - int(safe["n"] or 0),
         "rows": [{key: row[key] for key in row.keys()} for row in rows],
     }
@@ -387,12 +329,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only Shadow CANARY autonomy reviewer")
     parser.add_argument("--config", default="technoscout.config.json")
     sub = parser.add_subparsers(dest="command", required=True)
-    pending = sub.add_parser("pending")
-    pending.add_argument("--limit", type=int, default=5)
-    status = sub.add_parser("status")
-    status.add_argument("--limit", type=int, default=10)
-    recheck = sub.add_parser("recheck")
-    recheck.add_argument("job_id")
+    pending = sub.add_parser("pending"); pending.add_argument("--limit", type=int, default=5)
+    status = sub.add_parser("status"); status.add_argument("--limit", type=int, default=10)
+    recheck = sub.add_parser("recheck"); recheck.add_argument("job_id")
     args = parser.parse_args()
 
     cfg = _runtime_defaults(load_config(args.config))
@@ -407,11 +346,7 @@ def main() -> None:
                 print(f"    reason={item['reason']}")
         elif args.command == "recheck":
             item = review_shadow_candidate(
-                con,
-                cfg,
-                args.job_id,
-                room=room,
-                candidate_loader=recheck_candidate_loader,
+                con, cfg, args.job_id, room=room, candidate_loader=recheck_candidate_loader,
             )
             print(f"Shadow Autonomy Recheck | job={item['job_id']} {item['state']} conf={item['confidence']}")
             print(f"  reason={item['reason']}")
