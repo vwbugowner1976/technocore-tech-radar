@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite persistence for TechnoScout v0.7."""
+"""SQLite persistence for TechnoScout v0.8."""
 
 from __future__ import annotations
 
@@ -128,14 +128,97 @@ CREATE TABLE IF NOT EXISTS send_permits (
 );
 CREATE INDEX IF NOT EXISTS idx_send_permits_draft
     ON send_permits(draft_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS translations (
+    source_type TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    language TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    translated_text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(source_type, source_key, language)
+);
+CREATE INDEX IF NOT EXISTS idx_translations_language
+    ON translations(language, source_type);
+
+CREATE TABLE IF NOT EXISTS autonomy_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id INTEGER NOT NULL,
+    decided_at TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    allowed INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    outcome TEXT NOT NULL DEFAULT 'none'
+);
+CREATE INDEX IF NOT EXISTS idx_autonomy_draft
+    ON autonomy_decisions(draft_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS reaction_memory (
+    send_attempt_id INTEGER PRIMARY KEY,
+    draft_id INTEGER NOT NULL,
+    first_checked_at TEXT NOT NULL,
+    last_checked_at TEXT NOT NULL,
+    check_count INTEGER NOT NULL DEFAULT 1,
+    room TEXT NOT NULL,
+    our_seq INTEGER NOT NULL,
+    target_agent TEXT NOT NULL DEFAULT '',
+    classification TEXT NOT NULL,
+    coverage TEXT NOT NULL,
+    responder_did TEXT NOT NULL DEFAULT '',
+    responder_seq INTEGER,
+    overlap INTEGER NOT NULL DEFAULT 0,
+    foreign_posts INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_reaction_memory_class
+    ON reaction_memory(classification, last_checked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reaction_memory_responder
+    ON reaction_memory(responder_did, classification);
+CREATE INDEX IF NOT EXISTS idx_reaction_memory_target
+    ON reaction_memory(target_agent, classification);
+
+CREATE TABLE IF NOT EXISTS collaboration_shadow_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    room TEXT NOT NULL,
+    through_seq INTEGER NOT NULL,
+    marker TEXT NOT NULL,
+    actual_agent TEXT NOT NULL,
+    shadow_agent TEXT NOT NULL,
+    actual_relationship INTEGER NOT NULL DEFAULT 0,
+    shadow_relationship INTEGER NOT NULL DEFAULT 0,
+    shadow_collaboration INTEGER NOT NULL DEFAULT 0,
+    shadow_combined INTEGER NOT NULL DEFAULT 0,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    responder_direct INTEGER NOT NULL DEFAULT 0,
+    responder_likely INTEGER NOT NULL DEFAULT 0,
+    target_direct INTEGER NOT NULL DEFAULT 0,
+    target_likely INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(room, through_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_collab_shadow_marker
+    ON collaboration_shadow_decisions(marker, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS collaboration_shadow_evaluations (
+    decision_id INTEGER PRIMARY KEY,
+    evaluated_at TEXT NOT NULL,
+    state TEXT NOT NULL,
+    send_attempt_id INTEGER,
+    classification TEXT NOT NULL DEFAULT '',
+    coverage TEXT NOT NULL DEFAULT '',
+    responder_did TEXT NOT NULL DEFAULT '',
+    actual_target_replied INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_collab_shadow_eval_state
+    ON collaboration_shadow_evaluations(state, evaluated_at DESC);
 """
 
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path)
+    con = sqlite3.connect(path, timeout=30.0)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=30000")
     con.executescript(SCHEMA)
     return con
 
@@ -408,6 +491,59 @@ def pending_reply_drafts(con: sqlite3.Connection, limit: int = 20) -> list[sqlit
 
 
 
+def reply_drafts_by_status(
+    con: sqlite3.Connection,
+    status: str,
+    limit: int = 20,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT id, created_at, room, through_seq, target_agent,
+               relationship_score, reason, draft_text, status
+        FROM reply_drafts
+        WHERE status=?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (str(status), max(1, int(limit))),
+    ).fetchall()
+
+
+def mark_pending_draft_status(
+    con: sqlite3.Connection,
+    draft_id: int,
+    status: str,
+) -> bool:
+    normalized = str(status).strip().lower()
+    if normalized not in {"autonomy_blocked", "superseded"}:
+        raise ValueError("unsupported pending draft status")
+    cur = con.execute(
+        "UPDATE reply_drafts SET status=? WHERE id=? AND status='pending'",
+        (normalized, int(draft_id)),
+    )
+    return cur.rowcount > 0
+
+
+def supersede_older_pending_drafts(
+    con: sqlite3.Connection,
+    room: str,
+    target_agent: str,
+    keep_draft_id: int,
+) -> int:
+    cur = con.execute(
+        """
+        UPDATE reply_drafts
+        SET status='superseded'
+        WHERE status='pending'
+          AND room=?
+          AND target_agent=?
+          AND id<?
+        """,
+        (str(room), str(target_agent), int(keep_draft_id)),
+    )
+    return int(cur.rowcount)
+
+
 def get_reply_draft(con: sqlite3.Connection, draft_id: int) -> sqlite3.Row | None:
     return con.execute(
         """
@@ -443,7 +579,16 @@ def reply_draft_counts(con: sqlite3.Connection) -> dict[str, int]:
     rows = con.execute(
         "SELECT status, COUNT(*) n FROM reply_drafts GROUP BY status"
     ).fetchall()
-    result = {"pending": 0, "approved": 0, "rejected": 0, "sent": 0, "send_uncertain": 0, "send_blocked": 0}
+    result = {
+        "pending": 0,
+        "approved": 0,
+        "rejected": 0,
+        "sent": 0,
+        "send_uncertain": 0,
+        "send_blocked": 0,
+        "autonomy_blocked": 0,
+        "superseded": 0,
+    }
     for row in rows:
         result[str(row["status"])] = int(row["n"])
     return result
@@ -688,3 +833,536 @@ def revoke_send_permits(
         (int(draft_id),),
     )
     return int(cur.rowcount)
+
+
+
+def get_translation(
+    con: sqlite3.Connection,
+    source_type: str,
+    source_key: str,
+    language: str,
+    source_hash: str,
+) -> str | None:
+    row = con.execute(
+        """
+        SELECT translated_text, source_hash
+        FROM translations
+        WHERE source_type=? AND source_key=? AND language=?
+        """,
+        (str(source_type), str(source_key), str(language)),
+    ).fetchone()
+    if not row or str(row["source_hash"]) != str(source_hash):
+        return None
+    return str(row["translated_text"])
+
+
+def store_translation(
+    con: sqlite3.Connection,
+    source_type: str,
+    source_key: str,
+    language: str,
+    source_hash: str,
+    translated_text: str,
+    created_at: str,
+) -> None:
+    con.execute(
+        """
+        INSERT INTO translations(
+          source_type,source_key,language,source_hash,translated_text,created_at
+        ) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(source_type,source_key,language) DO UPDATE SET
+          source_hash=excluded.source_hash,
+          translated_text=excluded.translated_text,
+          created_at=excluded.created_at
+        """,
+        (
+            str(source_type),
+            str(source_key),
+            str(language),
+            str(source_hash),
+            str(translated_text)[:6000],
+            str(created_at),
+        ),
+    )
+
+
+def record_autonomy_decision(
+    con: sqlite3.Connection,
+    draft_id: int,
+    decided_at: str,
+    mode: str,
+    allowed: bool,
+    reason: str,
+    outcome: str = "none",
+) -> int:
+    cur = con.execute(
+        """
+        INSERT INTO autonomy_decisions(
+          draft_id,decided_at,mode,allowed,reason,outcome
+        ) VALUES(?,?,?,?,?,?)
+        """,
+        (
+            int(draft_id),
+            str(decided_at),
+            str(mode),
+            1 if allowed else 0,
+            str(reason)[:1000],
+            str(outcome)[:80],
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def update_autonomy_outcome(
+    con: sqlite3.Connection,
+    decision_id: int,
+    outcome: str,
+) -> None:
+    con.execute(
+        "UPDATE autonomy_decisions SET outcome=? WHERE id=?",
+        (str(outcome)[:80], int(decision_id)),
+    )
+
+
+def autonomy_decisions_for_draft(
+    con: sqlite3.Connection,
+    draft_id: int,
+    limit: int = 10,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT id,draft_id,decided_at,mode,allowed,reason,outcome
+        FROM autonomy_decisions
+        WHERE draft_id=?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (int(draft_id), max(1, int(limit))),
+    ).fetchall()
+
+
+def recent_sent_count(
+    con: sqlite3.Connection,
+    since_iso: str,
+) -> int:
+    row = con.execute(
+        """
+        SELECT COUNT(*) n
+        FROM send_attempts
+        WHERE status='sent' AND attempted_at>=?
+        """,
+        (str(since_iso),),
+    ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def last_sent_at_for_room(
+    con: sqlite3.Connection,
+    room: str,
+) -> str:
+    row = con.execute(
+        """
+        SELECT attempted_at
+        FROM send_attempts
+        WHERE status='sent' AND room=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (str(room),),
+    ).fetchone()
+    return str(row["attempted_at"]) if row else ""
+
+
+def last_sent_at_for_agent(
+    con: sqlite3.Connection,
+    agent_id: str,
+) -> str:
+    row = con.execute(
+        """
+        SELECT s.attempted_at
+        FROM send_attempts s
+        JOIN reply_drafts d ON d.id=s.draft_id
+        WHERE s.status='sent' AND d.target_agent=?
+        ORDER BY s.id DESC
+        LIMIT 1
+        """,
+        (str(agent_id),),
+    ).fetchone()
+    return str(row["attempted_at"]) if row else ""
+
+
+def get_reply_draft_by_room_seq(
+    con: sqlite3.Connection,
+    room: str,
+    through_seq: int,
+) -> sqlite3.Row | None:
+    return con.execute(
+        """
+        SELECT id, created_at, room, through_seq, target_agent,
+               relationship_score, reason, draft_text, status
+        FROM reply_drafts
+        WHERE room=? AND through_seq=?
+        """,
+        (str(room), int(through_seq)),
+    ).fetchone()
+
+
+def recent_observations(
+    con: sqlite3.Connection,
+    limit: int = 10,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT id,observed_at,room,relevance,technical,people,action,summary,tags_json
+        FROM observations
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+
+
+def get_autonomy_halt(con: sqlite3.Connection) -> str:
+    return get_meta(con, "autonomy_halt", "")
+
+
+def set_autonomy_halt(con: sqlite3.Connection, reason: str) -> None:
+    set_meta(con, "autonomy_halt", str(reason)[:2000])
+
+
+def clear_autonomy_halt(con: sqlite3.Connection) -> None:
+    con.execute("DELETE FROM meta WHERE key='autonomy_halt'")
+
+
+REACTION_CLASS_RANK = {
+    "READ_ERROR": 0,
+    "WINDOW_TRUNCATED": 1,
+    "NO_REACTION": 2,
+    "ROOM_ACTIVITY": 3,
+    "LIKELY_REACTION": 4,
+    "DIRECT_REPLY": 5,
+}
+
+
+def get_reaction_memory(
+    con: sqlite3.Connection,
+    send_attempt_id: int,
+) -> sqlite3.Row | None:
+    return con.execute(
+        """
+        SELECT send_attempt_id,draft_id,first_checked_at,last_checked_at,
+               check_count,room,our_seq,target_agent,classification,coverage,
+               responder_did,responder_seq,overlap,foreign_posts
+        FROM reaction_memory
+        WHERE send_attempt_id=?
+        """,
+        (int(send_attempt_id),),
+    ).fetchone()
+
+
+def upsert_reaction_memory(
+    con: sqlite3.Connection,
+    *,
+    send_attempt_id: int,
+    draft_id: int,
+    checked_at: str,
+    room: str,
+    our_seq: int,
+    target_agent: str,
+    classification: str,
+    coverage: str,
+    responder_did: str = "",
+    responder_seq: int | None = None,
+    overlap: int = 0,
+    foreign_posts: int = 0,
+) -> str:
+    """Persist canonical reaction evidence without storing raw message text."""
+    classification = str(classification).upper()
+    if classification not in REACTION_CLASS_RANK:
+        raise ValueError(f"invalid reaction classification: {classification}")
+    coverage = str(coverage).upper()
+    if coverage not in {"OBSERVED", "PARTIAL", "ERROR"}:
+        raise ValueError(f"invalid reaction coverage: {coverage}")
+
+    existing = get_reaction_memory(con, send_attempt_id)
+    if existing is None:
+        con.execute(
+            """
+            INSERT INTO reaction_memory(
+              send_attempt_id,draft_id,first_checked_at,last_checked_at,
+              check_count,room,our_seq,target_agent,classification,coverage,
+              responder_did,responder_seq,overlap,foreign_posts
+            ) VALUES(?,?,?,?,1,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(send_attempt_id),
+                int(draft_id),
+                str(checked_at),
+                str(checked_at),
+                str(room)[:80],
+                int(our_seq),
+                str(target_agent)[:240],
+                classification,
+                coverage,
+                str(responder_did)[:240],
+                int(responder_seq) if responder_seq is not None else None,
+                max(0, int(overlap)),
+                max(0, int(foreign_posts)),
+            ),
+        )
+        return "inserted"
+
+    old_class = str(existing["classification"])
+    old_coverage = str(existing["coverage"])
+    preserve = False
+
+    # Never lose a previously observed stronger reaction merely because a busy
+    # room later becomes truncated or the old reply leaves the fetch window.
+    if old_coverage == "OBSERVED" and coverage != "OBSERVED":
+        preserve = True
+    elif REACTION_CLASS_RANK.get(old_class, 0) > REACTION_CLASS_RANK[classification]:
+        preserve = True
+
+    if preserve:
+        con.execute(
+            """
+            UPDATE reaction_memory
+            SET last_checked_at=?, check_count=check_count+1,
+                foreign_posts=MAX(foreign_posts, ?)
+            WHERE send_attempt_id=?
+            """,
+            (
+                str(checked_at),
+                max(0, int(foreign_posts)),
+                int(send_attempt_id),
+            ),
+        )
+        return "preserved"
+
+    con.execute(
+        """
+        UPDATE reaction_memory
+        SET last_checked_at=?, check_count=check_count+1,
+            draft_id=?,room=?,our_seq=?,target_agent=?,
+            classification=?,coverage=?,responder_did=?,responder_seq=?,
+            overlap=?,foreign_posts=?
+        WHERE send_attempt_id=?
+        """,
+        (
+            str(checked_at),
+            int(draft_id),
+            str(room)[:80],
+            int(our_seq),
+            str(target_agent)[:240],
+            classification,
+            coverage,
+            str(responder_did)[:240],
+            int(responder_seq) if responder_seq is not None else None,
+            max(0, int(overlap)),
+            max(0, int(foreign_posts)),
+            int(send_attempt_id),
+        ),
+    )
+    return "updated"
+
+
+def reaction_memory_rows(
+    con: sqlite3.Connection,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT send_attempt_id,draft_id,first_checked_at,last_checked_at,
+               check_count,room,our_seq,target_agent,classification,coverage,
+               responder_did,responder_seq,overlap,foreign_posts
+        FROM reaction_memory
+        ORDER BY send_attempt_id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+
+def reaction_memory_counts(con: sqlite3.Connection) -> dict[str, int]:
+    result = {
+        "DIRECT_REPLY": 0,
+        "LIKELY_REACTION": 0,
+        "ROOM_ACTIVITY": 0,
+        "WINDOW_TRUNCATED": 0,
+        "NO_REACTION": 0,
+        "READ_ERROR": 0,
+    }
+    for row in con.execute(
+        "SELECT classification,COUNT(*) AS n FROM reaction_memory GROUP BY classification"
+    ).fetchall():
+        result[str(row["classification"])] = int(row["n"])
+    return result
+
+
+def record_collaboration_shadow_decision(
+    con: sqlite3.Connection,
+    *,
+    observed_at: str,
+    room: str,
+    through_seq: int,
+    marker: str,
+    actual_agent: str,
+    shadow_agent: str,
+    actual_relationship: int,
+    shadow_relationship: int,
+    shadow_collaboration: int,
+    shadow_combined: int,
+    candidate_count: int,
+    responder_direct: int,
+    responder_likely: int,
+    target_direct: int,
+    target_likely: int,
+) -> bool:
+    marker = str(marker).upper()
+    if marker not in {"SAME", "WOULD_PREFER"}:
+        raise ValueError(f"invalid collaboration shadow marker: {marker}")
+    cur = con.execute(
+        """
+        INSERT OR IGNORE INTO collaboration_shadow_decisions(
+          observed_at,room,through_seq,marker,actual_agent,shadow_agent,
+          actual_relationship,shadow_relationship,shadow_collaboration,
+          shadow_combined,candidate_count,responder_direct,responder_likely,
+          target_direct,target_likely
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            str(observed_at),
+            str(room)[:80],
+            int(through_seq),
+            marker,
+            str(actual_agent)[:240],
+            str(shadow_agent)[:240],
+            max(0, min(100, int(actual_relationship))),
+            max(0, min(100, int(shadow_relationship))),
+            max(0, min(100, int(shadow_collaboration))),
+            max(0, min(100, int(shadow_combined))),
+            max(0, int(candidate_count)),
+            max(0, int(responder_direct)),
+            max(0, int(responder_likely)),
+            max(0, int(target_direct)),
+            max(0, int(target_likely)),
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def collaboration_shadow_counts(con: sqlite3.Connection) -> dict[str, int]:
+    result = {"SAME": 0, "WOULD_PREFER": 0}
+    for row in con.execute(
+        """
+        SELECT marker,COUNT(*) AS n
+        FROM collaboration_shadow_decisions
+        GROUP BY marker
+        """
+    ).fetchall():
+        result[str(row["marker"])] = int(row["n"])
+    return result
+
+
+def collaboration_shadow_rows(
+    con: sqlite3.Connection,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT
+          id,observed_at,room,through_seq,marker,actual_agent,shadow_agent,
+          actual_relationship,shadow_relationship,shadow_collaboration,
+          shadow_combined,candidate_count,responder_direct,responder_likely,
+          target_direct,target_likely
+        FROM collaboration_shadow_decisions
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+
+def upsert_collaboration_shadow_evaluation(
+    con: sqlite3.Connection,
+    *,
+    decision_id: int,
+    evaluated_at: str,
+    state: str,
+    send_attempt_id: int | None,
+    classification: str,
+    coverage: str,
+    responder_did: str,
+    actual_target_replied: bool,
+) -> None:
+    state = str(state).upper()
+    if state not in {"UNRESOLVED", "ACTUAL_REPLIED", "ACTUAL_NO_REPLY"}:
+        raise ValueError(f"invalid collaboration shadow evaluation state: {state}")
+    con.execute(
+        """
+        INSERT INTO collaboration_shadow_evaluations(
+          decision_id,evaluated_at,state,send_attempt_id,classification,
+          coverage,responder_did,actual_target_replied
+        ) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(decision_id) DO UPDATE SET
+          evaluated_at=excluded.evaluated_at,
+          state=excluded.state,
+          send_attempt_id=excluded.send_attempt_id,
+          classification=excluded.classification,
+          coverage=excluded.coverage,
+          responder_did=excluded.responder_did,
+          actual_target_replied=excluded.actual_target_replied
+        """,
+        (
+            int(decision_id),
+            str(evaluated_at),
+            state,
+            int(send_attempt_id) if send_attempt_id is not None else None,
+            str(classification)[:80],
+            str(coverage)[:40],
+            str(responder_did)[:240],
+            1 if actual_target_replied else 0,
+        ),
+    )
+
+
+def collaboration_shadow_evaluation_counts(
+    con: sqlite3.Connection,
+) -> dict[str, int]:
+    result = {
+        "UNRESOLVED": 0,
+        "ACTUAL_REPLIED": 0,
+        "ACTUAL_NO_REPLY": 0,
+    }
+    for row in con.execute(
+        """
+        SELECT state,COUNT(*) AS n
+        FROM collaboration_shadow_evaluations
+        GROUP BY state
+        """
+    ).fetchall():
+        result[str(row["state"])] = int(row["n"])
+    return result
+
+
+def collaboration_shadow_evaluation_rows(
+    con: sqlite3.Connection,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT
+          e.decision_id,e.evaluated_at,e.state,e.send_attempt_id,
+          e.classification,e.coverage,e.responder_did,
+          e.actual_target_replied,
+          d.marker,d.room,d.through_seq,d.actual_agent,d.shadow_agent,
+          d.actual_relationship,d.shadow_relationship,
+          d.shadow_collaboration,d.shadow_combined,d.candidate_count
+        FROM collaboration_shadow_evaluations e
+        JOIN collaboration_shadow_decisions d ON d.id=e.decision_id
+        ORDER BY e.decision_id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
