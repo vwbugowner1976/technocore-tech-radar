@@ -24,13 +24,14 @@ TESTS = [
     "tests.test_job_success_criterion_gate",
     "tests.test_job_postclaim_pipeline",
     "tests.test_job_action",
+    "tests.test_mlx_process_lock",
 ]
 
 
 def main() -> int:
     print("=== TechnoScout JOB FLOW SELFTEST ===")
     print("LOCAL ONLY: no network, no CLAIM, no DELIVER, no signed write")
-    print("fixtures=shared-GPU + fidelity + stale-CLAIM + canary-policy + shadow/autonomy/snapshot regressions")
+    print("fixtures=shared-GPU + MLX-process-lock + fidelity + stale-CLAIM + canary-policy + shadow/autonomy/snapshot regressions")
 
     suite = unittest.defaultTestLoader.loadTestsFromNames(TESTS)
     result = unittest.TextTestRunner(verbosity=1).run(suite)
