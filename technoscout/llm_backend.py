@@ -14,6 +14,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from technoscout.mlx_process_lock import InterprocessFileLock
+
 
 class LLMBackend:
     def chat(
@@ -90,11 +92,12 @@ class HttpLLMBackend(LLMBackend):
 
 
 class ManagedMLXBackend(LLMBackend):
-    """One persistent MLX process.
+    """One persistent MLX process per caller, serialized across callers.
 
-    If a request exceeds its deadline, the worker process group is terminated
-    before TimeoutError is raised. Therefore timed-out generation cannot remain
-    queued or continue consuming GPU/CPU behind the next TechnoScout request.
+    A filesystem advisory lock covers worker startup and each complete generation,
+    so TechnoScout, Job Shadow, Refiner, and other local helpers cannot start or
+    generate with managed MLX at the same time. If a request exceeds its deadline,
+    the worker process group is terminated before TimeoutError is raised.
     """
 
     def __init__(self, cfg: dict[str, Any]) -> None:
@@ -116,12 +119,30 @@ class ManagedMLXBackend(LLMBackend):
         )
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_handle = self.log_path.open("a", encoding="utf-8", buffering=1)
+        self.process_lock_path = self._resolve_shared_path(
+            str(cfg.get("mlx_process_lock_file", "data/mlx-worker.lock"))
+        )
+        self.process_lock_timeout_seconds = max(
+            0.0,
+            float(cfg.get("mlx_process_lock_timeout_seconds", 45.0)),
+        )
+        self.process_lock_poll_seconds = max(
+            0.01,
+            min(1.0, float(cfg.get("mlx_process_lock_poll_seconds", 0.05))),
+        )
 
     def _resolve_path(self, value: str) -> Path:
         p = Path(value).expanduser()
         if p.is_absolute():
             return p
         return Path.cwd() / p
+
+    def _resolve_shared_path(self, value: str) -> Path:
+        p = Path(value).expanduser()
+        if p.is_absolute():
+            return p
+        repo_root = Path(__file__).resolve().parent.parent
+        return repo_root / p
 
     def _resolve_worker_python(self) -> str:
         explicit = str(self.cfg.get("mlx_worker_python", "")).strip()
@@ -277,7 +298,7 @@ class ManagedMLXBackend(LLMBackend):
             flush=True,
         )
 
-    def chat(
+    def _chat_locked(
         self,
         model: str,
         messages: list[dict[str, Any]],
@@ -334,6 +355,37 @@ class ManagedMLXBackend(LLMBackend):
             )
         return str(response.get("content", ""))
 
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float,
+    ) -> str:
+        lock = InterprocessFileLock(
+            self.process_lock_path,
+            timeout_seconds=self.process_lock_timeout_seconds,
+            poll_seconds=self.process_lock_poll_seconds,
+        )
+        waited = lock.acquire()
+        if waited >= 0.25:
+            print(
+                f"[mlx-lock] acquired after {waited:.1f}s pid={os.getpid()} "
+                f"path={self.process_lock_path}",
+                flush=True,
+            )
+        try:
+            return self._chat_locked(
+                model,
+                messages,
+                max_tokens,
+                temperature,
+                timeout_seconds,
+            )
+        finally:
+            lock.release()
+
     def models(self) -> list[str]:
         values = [
             str(self.cfg.get("triage_model", "")).strip(),
@@ -350,7 +402,7 @@ class ManagedMLXBackend(LLMBackend):
         state = "running" if self.proc is not None and self.proc.poll() is None else "stopped"
         return (
             f"managed_mlx state={state} model={self.loaded_model or '-'} "
-            f"restarts={self.restart_count}"
+            f"restarts={self.restart_count} lock={self.process_lock_path}"
         )
 
     def close(self) -> None:
