@@ -143,9 +143,27 @@ def run_once(
                 )
                 continue
 
-            if llm is None:
-                llm = make_llm(cfg)
-            result = run_refiner(cfg, candidate, llm, model)
+            try:
+                if llm is None:
+                    llm = make_llm(cfg)
+                result = run_refiner(cfg, candidate, llm, model)
+            except Exception as exc:
+                summary["retry_later"] += 1
+                summary["rows"].append(
+                    {
+                        "job_id": candidate["job_id"],
+                        "state": "RETRY_LATER",
+                        "live": live_state,
+                        "detail": f"REFINER_ERROR:{type(exc).__name__}",
+                    }
+                )
+                if llm is not None:
+                    try:
+                        llm.close()
+                    finally:
+                        llm = None
+                continue
+
             store_refinement(con, candidate, result)
             summary["refined"] += 1
             if result.get("decision") == "SAFE_FIT":
@@ -227,6 +245,8 @@ def print_summary(summary: dict[str, Any]) -> None:
                 f" decision={row['decision']} rel={row['relevance']} "
                 f"fit={row['technical_fit']} conf={row['confidence']}"
             )
+        if row.get("detail"):
+            line += f" detail={row['detail']}"
         print(line)
     if summary["ready"]:
         print(f"READY candidate={summary['ready_job_id']} — evidence only; no CLAIM was sent.")
