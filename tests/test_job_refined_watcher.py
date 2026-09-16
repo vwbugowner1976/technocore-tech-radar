@@ -171,6 +171,33 @@ class JobRefinedWatcherTests(unittest.TestCase):
         self.assertEqual(summary["ready_job_id"], "kabcdef0123")
         self.assertTrue(llm.closed)
 
+    def test_refiner_timeout_is_retry_later_and_closes_llm(self):
+        llm = FakeLLM()
+
+        def revalidator(cfg, candidate):
+            return {"state": "OPEN_CONFIRMED", "lifecycle": "OPEN", "pages": 1, "messages": 10}
+
+        def refiner(cfg, candidate, llm_obj, model):
+            raise TimeoutError("managed MLX process lock timed out")
+
+        summary = run_once(
+            self.con,
+            self.cfg,
+            revalidator=revalidator,
+            refiner=refiner,
+            llm_factory=lambda cfg: llm,
+        )
+        self.assertEqual(summary["refined"], 0)
+        self.assertEqual(summary["retry_later"], 1)
+        self.assertEqual(summary["rows"][0]["state"], "RETRY_LATER")
+        self.assertEqual(summary["rows"][0]["detail"], "REFINER_ERROR:TimeoutError")
+        self.assertTrue(llm.closed)
+        row = self.con.execute(
+            "SELECT 1 FROM job_candidate_refinements WHERE job_id=?",
+            ("kabcdef0123",),
+        ).fetchone()
+        self.assertIsNone(row)
+
     def test_shadow_canary_hook_runs_only_for_ready_summary(self):
         calls = []
 
