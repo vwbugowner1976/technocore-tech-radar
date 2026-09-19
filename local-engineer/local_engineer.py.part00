@@ -13,7 +13,7 @@ BLOCKED = [
     r'\bgit\s+clean\b', r'\bgit\s+checkout\s+--\b', r'\bgit\s+restore\s+\.\b',
     r'\bshutdown\b', r'\breboot\b', r'\bdiskutil\b', r'\bmkfs\b', r'\bdd\s+if=',
     r'\blaunchctl\b', r'\bscp\b', r'\brsync\b', r'\bcurl\b', r'\bwget\b',
-    r'[;&<>\x60\n]', r'&&', r'\|\|', r'\$\('
+    r'[;&|<>\x60\n]', r'\$\('
 ]
 ALLOWED_PREFIX = (
     'git status', 'git diff', 'git log', 'git branch', 'git rev-parse', 'git show',
