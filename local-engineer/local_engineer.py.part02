@@ -1,0 +1,75 @@
+- Prefer replace_text for small edits. Use write_file mainly for new/small files.
+- Do not edit generated build outputs.
+- Run the narrowest useful tests/build after edits. If it fails, inspect the error and iterate.
+- Keep tool output bounded; read only needed line ranges.
+- Do not commit. End with a concise report: files changed, verification run, remaining risks.
+'''
+    messages=[{'role':'system','content':system},{'role':'user','content':task}]
+    tools=tool_defs()
+    for round_no in range(1, MAX_ROUNDS+1):
+        payload={'model':mid,'messages':messages,'tools':tools,'tool_choice':'auto','temperature':0.2,'max_tokens':4096}
+        try:
+            resp=get_json(API_BASE+'/chat/completions',payload,timeout=900)
+        except urllib.error.HTTPError as e:
+            body=e.read().decode(errors='replace')
+            raise SystemExit(f'Bonsai API error {e.code}: {body[:1200]}')
+        msg=resp['choices'][0]['message']
+        calls=msg.get('tool_calls') or []
+        if not calls:
+            print(msg.get('content') or '[no final content]')
+            return 0
+        messages.append({'role':'assistant','content':msg.get('content'),'tool_calls':calls})
+        for call in calls:
+            fn=call['function']['name']
+            try: args=json.loads(call['function'].get('arguments') or '{}')
+            except Exception: args={}
+            print(f'[tool {round_no}] {fn}')
+            result=dispatch(project,fn,args)
+            messages.append({'role':'tool','tool_call_id':call['id'],'content':result})
+    print('[ERR] tool round limit reached')
+    return 2
+
+
+def discover(cfg):
+    host=os.environ.get('LOCAL_ENGINEER_SSH_HOST', cfg.get('settings',{}).get('ssh_host','wsl'))
+    roots=['/home/stc/zmk-dev','/home/stc/zmk-sim','/home/stc/rmk-dev']
+    expr=' '.join(shlex.quote(r) for r in roots)
+    cmd=f"for r in {expr}; do [ -d \"$r\" ] && find \"$r\" -maxdepth 6 -type d -name .git -print; done"
+    p=subprocess.run(['ssh',host,cmd],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=60)
+    if p.returncode:
+        print(p.stdout); return p.returncode
+    repos=[]
+    for line in p.stdout.splitlines():
+        if line.endswith('/.git'): repos.append(line[:-5])
+    for r in sorted(set(repos)):
+        print(r)
+    return 0
+
+
+def main():
+    ap=argparse.ArgumentParser(prog='local-engineer')
+    sub=ap.add_subparsers(dest='cmd',required=True)
+    sub.add_parser('status'); sub.add_parser('projects'); sub.add_parser('discover')
+    b=sub.add_parser('build'); b.add_argument('project'); b.add_argument('extra',nargs='*')
+    f=sub.add_parser('fix'); f.add_argument('project'); f.add_argument('task',nargs='+')
+    sub.add_parser('technocore-bonsai')
+    args=ap.parse_args()
+    cfg=load_cfg()
+    if args.cmd=='status':
+        subprocess.run([str(HOME/'bin/llm'),'status']); return
+    if args.cmd=='projects':
+        for k,v in cfg['projects'].items(): print(f"{k:20} {v.get('transport','local'):5} {v['root']}")
+        return
+    if args.cmd=='discover': raise SystemExit(discover(cfg))
+    pname='technocore' if args.cmd=='technocore-bonsai' else args.project
+    if pname not in cfg['projects']: raise SystemExit(f'unknown project: {pname}')
+    p=Project(pname,cfg['projects'][pname],cfg)
+    if not p.exists(): raise SystemExit(f'project not reachable: {p.root} ({p.transport})')
+    if args.cmd=='build':
+        rc,out=p.build(' '.join(args.extra)); print(out); raise SystemExit(rc)
+    if args.cmd=='technocore-bonsai':
+        task='''Inspect the current local Technocore implementation and add a managed_bonsai LLM backend alongside the existing managed_mlx backend. Preserve managed_mlx behavior. managed_bonsai must call the local OpenAI-compatible Bonsai API at http://127.0.0.1:8080/v1 and must not spawn mlx_worker.py. Backend selection must honor environment variable TECHNOCORE_LLM_BACKEND, with values managed_bonsai or managed_mlx, while preserving the current default when the variable is absent. Reuse existing prompt, timeout, logging, draft/review/quality-gate behavior. Add or update deterministic tests and concise documentation. Do not touch secrets, signing identity, launch daemon plist files, or network posting safety rules. Run the existing unit tests and any focused new tests. Do not commit.'''
+        raise SystemExit(agent(p,task))
+    raise SystemExit(agent(p,' '.join(args.task)))
+
+if __name__=='__main__': main()
