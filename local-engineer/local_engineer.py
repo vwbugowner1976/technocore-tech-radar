@@ -6,7 +6,8 @@ CFG = pathlib.Path(os.environ.get('LOCAL_ENGINEER_CONFIG', HOME/'.config/local-e
 STATE = HOME/'.local/state/local-engineer'
 API_BASE = os.environ.get('BONSAI_API_BASE', 'http://127.0.0.1:8080/v1')
 MAX_ROUNDS = 20
-MAX_OUTPUT = 6500
+MAX_OUTPUT = 2500
+KEEP_TOOL_ROUNDS = 2
 
 BLOCKED = [
     r'(^|[;&| ])sudo([ ;&|]|$)', r'\brm\b', r'\bmv\b', r'\bgit\s+push\b', r'\bgit\s+reset\b',
@@ -245,10 +246,19 @@ Rules:
 - Keep tool output bounded; read only needed line ranges.
 - Do not commit. End with a concise report: files changed, verification run, remaining risks.
 '''
-    messages=[{'role':'system','content':system},{'role':'user','content':task}]
+    base_messages=[{'role':'system','content':system},{'role':'user','content':task}]
+    tool_rounds=[]
     tools=tool_defs()
     for round_no in range(1, MAX_ROUNDS+1):
-        payload={'model':mid,'messages':messages,'tools':tools,'tool_choice':'auto','temperature':0.2,'max_tokens':4096}
+        messages=list(base_messages)
+        if len(tool_rounds) > KEEP_TOOL_ROUNDS:
+            messages.append({
+                'role':'system',
+                'content':'Earlier tool rounds were intentionally dropped to stay within the 8K context window. Re-check any fact you still need with tools; do not assume dropped output.'
+            })
+        for bundle in tool_rounds[-KEEP_TOOL_ROUNDS:]:
+            messages.extend(bundle)
+        payload={'model':mid,'messages':messages,'tools':tools,'tool_choice':'auto','temperature':0.2,'max_tokens':2048}
         try:
             resp=get_json(API_BASE+'/chat/completions',payload,timeout=900)
         except urllib.error.HTTPError as e:
@@ -259,14 +269,15 @@ Rules:
         if not calls:
             print(msg.get('content') or '[no final content]')
             return 0
-        messages.append({'role':'assistant','content':msg.get('content'),'tool_calls':calls})
+        bundle=[{'role':'assistant','content':msg.get('content'),'tool_calls':calls}]
         for call in calls:
             fn=call['function']['name']
             try: args=json.loads(call['function'].get('arguments') or '{}')
             except Exception: args={}
             print(f'[tool {round_no}] {fn}')
             result=dispatch(project,fn,args)
-            messages.append({'role':'tool','tool_call_id':call['id'],'content':result})
+            bundle.append({'role':'tool','tool_call_id':call['id'],'content':result})
+        tool_rounds.append(bundle)
     print('[ERR] tool round limit reached')
     return 2
 
