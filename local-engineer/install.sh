@@ -4,7 +4,7 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 APP="$HOME/.local/share/local-engineer"
 CFG="$HOME/.config/local-engineer"
 mkdir -p "$APP" "$CFG" "$HOME/bin" "$HOME/.local/state/local-engineer"
-cat "$SRC/local_engineer.py.part00" "$SRC/local_engineer.py.part01" "$SRC/local_engineer.py.part02" > "$APP/local_engineer.py"
+cp "$SRC/local_engineer.py" "$APP/local_engineer.py"
 cp "$SRC/llm" "$HOME/bin/llm"
 chmod +x "$APP/local_engineer.py" "$HOME/bin/llm"
 cat > "$HOME/bin/local-engineer" <<WRAP
