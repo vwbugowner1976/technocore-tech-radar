@@ -1,0 +1,176 @@
+#!/bin/zsh
+set -u
+
+BONSAI_HOME="${BONSAI_HOME:-$HOME/Bonsai-demo}"
+BONSAI_MODEL_PATH="${BONSAI_MODEL_PATH:-$BONSAI_HOME/models/bonsai2-gguf/27B/Ternary-Bonsai-2-27B-PQ2_0.gguf}"
+STATE_DIR="$HOME/.local/state/llm-switch"
+PID_FILE="$STATE_DIR/bonsai.pid"
+LOG_FILE="$STATE_DIR/bonsai.log"
+PORT="${BONSAI_PORT:-8080}"
+
+TECHNO_PLISTS=(
+  "/Library/LaunchDaemons/com.vwbugowner.technoscout.plist"
+  "/Library/LaunchDaemons/com.vwbugowner.technoscout-jobshadow.plist"
+  "/Library/LaunchDaemons/com.vwbugowner.technoscout-jobrefiner.plist"
+)
+
+mkdir -p "$STATE_DIR"
+
+api_ready() {
+  curl -fsS --max-time 2 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1
+}
+
+stop_bonsai() {
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "[llm] stopping Bonsai launcher PID $pid"
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+  fi
+  pkill -f "$BONSAI_HOME/bin/mac/llama-server" 2>/dev/null || true
+  sleep 1
+}
+
+stop_technocore() {
+  echo "[llm] stopping Technocore/Qwen services"
+  sudo -v || exit 1
+  for plist in "${TECHNO_PLISTS[@]}"; do
+    [ -f "$plist" ] && sudo launchctl bootout system "$plist" 2>/dev/null || true
+  done
+  pkill -f "$HOME/technocore-tech-radar/technoscout.py" 2>/dev/null || true
+  pkill -f "$HOME/technocore-tech-radar/technoscout/mlx_worker.py" 2>/dev/null || true
+  pkill -f "$HOME/technocore-tech-radar/job_refined_watcher.py" 2>/dev/null || true
+  sleep 1
+}
+
+set_technocore_backend() {
+  local backend="$1"
+  sudo -v || exit 1
+  sudo launchctl setenv TECHNOCORE_LLM_BACKEND "$backend"
+}
+
+start_technocore() {
+  echo "[llm] starting Technocore services"
+  sudo -v || exit 1
+  for plist in "${TECHNO_PLISTS[@]}"; do
+    if [ -f "$plist" ]; then
+      sudo launchctl bootstrap system "$plist" 2>/dev/null || true
+    fi
+  done
+}
+
+start_bonsai() {
+  if api_ready; then
+    echo "[OK] Bonsai API already ready on :$PORT"
+    return 0
+  fi
+  [ -x "$BONSAI_HOME/scripts/start_llama_server.sh" ] || {
+    echo "[ERR] Bonsai launcher not found: $BONSAI_HOME/scripts/start_llama_server.sh"
+    exit 1
+  }
+  [ -f "$BONSAI_MODEL_PATH" ] || {
+    echo "[ERR] Bonsai model not found: $BONSAI_MODEL_PATH"
+    exit 1
+  }
+  local used
+  used="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+  if [ -n "$used" ]; then
+    echo "[ERR] port $PORT already in use by PID $used"
+    ps -p "$used" -o command= 2>/dev/null || true
+    exit 1
+  fi
+
+  echo "[llm] starting Bonsai 2 27B: Metal, ctx=8192, text-only, reasoning=2048"
+  cd "$BONSAI_HOME" || exit 1
+  nohup env     BONSAI_FAMILY=bonsai2     BONSAI_MODEL=27B     BONSAI_GGUF="$BONSAI_MODEL_PATH"     BONSAI_CTX=8192     BONSAI_NGL=99     PORT="$PORT"     "$BONSAI_HOME/scripts/start_llama_server.sh" --reasoning-budget 2048     >"$LOG_FILE" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PID_FILE"
+
+  local i
+  for i in {1..120}; do
+    if api_ready; then
+      echo "[OK] Bonsai ready: http://127.0.0.1:${PORT}/v1"
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "[ERR] Bonsai exited while starting"
+      tail -80 "$LOG_FILE" 2>/dev/null || true
+      exit 1
+    fi
+    sleep 1
+  done
+  echo "[ERR] Bonsai did not become ready"
+  tail -80 "$LOG_FILE" 2>/dev/null || true
+  exit 1
+}
+
+status() {
+  echo "=== Local LLM status ==="
+  if api_ready; then
+    echo "Bonsai API   : RUNNING (:${PORT})"
+  else
+    echo "Bonsai API   : stopped"
+  fi
+  local q s
+  q="$(pgrep -f "$HOME/technocore-tech-radar/technoscout/mlx_worker.py" 2>/dev/null | wc -l | tr -d ' ')"
+  s="$(pgrep -f "$HOME/technocore-tech-radar/technoscout.py" 2>/dev/null | wc -l | tr -d ' ')"
+  echo "Qwen workers : $q"
+  echo "Technoscout  : $s"
+  echo
+  ps -axo pid,rss,command | grep -E 'llama-server|mlx_worker.py|technoscout.py' | grep -v grep || true
+}
+
+case "${1:-status}" in
+  bonsai)
+    stop_technocore
+    set_technocore_backend managed_bonsai
+    stop_bonsai
+    start_bonsai
+    ;;
+  bonsai-tech)
+    stop_technocore
+    set_technocore_backend managed_bonsai
+    stop_bonsai
+    start_bonsai
+    start_technocore
+    sleep 4
+    if pgrep -f "$HOME/technocore-tech-radar/technoscout/mlx_worker.py" >/dev/null 2>&1; then
+      echo "[ERR] Qwen worker appeared in managed_bonsai mode; stopping Technocore to protect memory"
+      stop_technocore
+      exit 1
+    fi
+    echo "[OK] Technocore is running without a Qwen worker"
+    ;;
+  qwen)
+    stop_bonsai
+    stop_technocore
+    set_technocore_backend managed_mlx
+    start_technocore
+    ;;
+  stop)
+    stop_bonsai
+    stop_technocore
+    echo "[OK] local LLM services stopped"
+    ;;
+  status)
+    status
+    ;;
+  logs)
+    tail -f "$LOG_FILE"
+    ;;
+  *)
+    cat <<USAGE
+Usage:
+  llm bonsai       stop Technocore/Qwen and start Bonsai (Local Engineer mode)
+  llm bonsai-tech  start Bonsai, then Technocore using managed_bonsai
+  llm qwen         stop Bonsai and start Technocore using managed_mlx
+  llm stop
+  llm status
+  llm logs
+USAGE
+    exit 2
+    ;;
+esac
