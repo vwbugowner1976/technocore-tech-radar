@@ -8,6 +8,8 @@ API_BASE = os.environ.get('BONSAI_API_BASE', 'http://127.0.0.1:8080/v1')
 MAX_ROUNDS = 20
 MAX_OUTPUT = 2500
 KEEP_TOOL_ROUNDS = 2
+MAX_WORKING_MEMORY = 3200
+MAX_REPEAT_CALLS = 2
 
 BLOCKED = [
     r'(^|[;&| ])sudo([ ;&|]|$)', r'\brm\b', r'\bmv\b', r'\bgit\s+push\b', r'\bgit\s+reset\b',
@@ -243,14 +245,34 @@ Rules:
 - Prefer replace_text for small edits. Use write_file mainly for new/small files.
 - Do not edit generated build outputs.
 - Run the narrowest useful tests/build after edits. If it fails, inspect the error and iterate.
-- Keep tool output bounded; read only needed line ranges. Older tool rounds may be dropped from context; re-check facts with tools when needed.
+- Keep tool output bounded; read only needed line ranges. Older tool rounds may be dropped, but a compact working memory is provided. Do not repeat identical searches/commands; use the memory, change the query, or proceed.
 - Do not commit. End with a concise report: files changed, verification run, remaining risks.
 '''
-    base_messages=[{'role':'system','content':system},{'role':'user','content':task}]
     tool_rounds=[]
     tools=tool_defs()
+    working_memory=[]
+    seen_calls={}
+
+    def remember_tool(fn, args, result):
+        arg_text=json.dumps(args, ensure_ascii=False, sort_keys=True)
+        compact=' '.join((result or '').split())
+        if len(compact) > 700:
+            compact=compact[:500] + ' ... ' + compact[-180:]
+        working_memory.append(f'{fn} {arg_text} -> {compact}')
+        joined='\n'.join(working_memory)
+        while len(joined) > MAX_WORKING_MEMORY and len(working_memory) > 1:
+            working_memory.pop(0)
+            joined='\n'.join(working_memory)
+
     for round_no in range(1, MAX_ROUNDS+1):
-        messages=list(base_messages)
+        memory_text='\n'.join(working_memory)
+        user_content=task
+        if memory_text:
+            user_content += (
+                '\n\nCompact working memory from earlier tool rounds '
+                '(may be incomplete; verify critical facts with tools):\n' + memory_text
+            )
+        messages=[{'role':'system','content':system},{'role':'user','content':user_content}]
         for bundle in tool_rounds[-KEEP_TOOL_ROUNDS:]:
             messages.extend(bundle)
         payload={'model':mid,'messages':messages,'tools':tools,'tool_choice':'auto','temperature':0.2,'max_tokens':2048}
@@ -269,8 +291,18 @@ Rules:
             fn=call['function']['name']
             try: args=json.loads(call['function'].get('arguments') or '{}')
             except Exception: args={}
+            signature=fn + ':' + json.dumps(args, ensure_ascii=False, sort_keys=True)
+            seen_calls[signature]=seen_calls.get(signature,0)+1
             print(f'[tool {round_no}] {fn}')
-            result=dispatch(project,fn,args)
+            if seen_calls[signature] > MAX_REPEAT_CALLS:
+                result=(
+                    'Repeated identical tool call suppressed. The same tool and arguments '
+                    'were already executed twice. Use the compact working memory/current context, '
+                    'change the query/line range/command, or proceed to an edit/test.'
+                )
+            else:
+                result=dispatch(project,fn,args)
+            remember_tool(fn,args,result)
             bundle.append({'role':'tool','tool_call_id':call['id'],'content':result})
         tool_rounds.append(bundle)
     print('[ERR] tool round limit reached')
