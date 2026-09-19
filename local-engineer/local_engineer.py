@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+import argparse, base64, datetime as dt, json, os, pathlib, re, shlex, subprocess, sys, urllib.request, urllib.error
+
+HOME = pathlib.Path.home()
+CFG = pathlib.Path(os.environ.get('LOCAL_ENGINEER_CONFIG', HOME/'.config/local-engineer/projects.json'))
+STATE = HOME/'.local/state/local-engineer'
+API_BASE = os.environ.get('BONSAI_API_BASE', 'http://127.0.0.1:8080/v1')
+MAX_ROUNDS = 20
+MAX_OUTPUT = 6500
+
+BLOCKED = [
+    r'(^|[;&| ])sudo([ ;&|]|$)', r'\brm\b', r'\bmv\b', r'\bgit\s+push\b', r'\bgit\s+reset\b',
+    r'\bgit\s+clean\b', r'\bgit\s+checkout\s+--\b', r'\bgit\s+restore\s+\.\b',
+    r'\bshutdown\b', r'\breboot\b', r'\bdiskutil\b', r'\bmkfs\b', r'\bdd\s+if=',
+    r'\blaunchctl\b', r'\bscp\b', r'\brsync\b', r'\bcurl\b', r'\bwget\b',
+    r'[;&|<>\x60\n]', r'\$\('
+]
+ALLOWED_PREFIX = (
+    'git status', 'git diff', 'git log', 'git branch', 'git rev-parse', 'git show',
+    'ls', 'find', 'rg', 'grep', 'sed', 'head', 'tail', 'wc', 'pwd', 'stat',
+    'python ', 'python3 ', 'pytest', 'cargo ', 'west ', 'cmake ', 'ninja', 'ctest',
+    'make', 'bash ', './', '.venv/', 'sh '
+)
+SENSITIVE = re.compile(r'(^|/)(\.env($|\.)|.*(secret|token|private[_-]?key|sign[_-]?seed|credentials?).*)', re.I)
+
+
+def load_cfg():
+    if not CFG.exists():
+        raise SystemExit(f'Config not found: {CFG}\nRun local-engineer init first.')
+    return json.loads(CFG.read_text())
+
+
+def run_local(cmd, cwd=None, timeout=900):
+    p = subprocess.run(cmd, cwd=cwd, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+    return p.returncode, p.stdout
+
+
+def clip(s):
+    s = s or ''
+    if len(s) <= MAX_OUTPUT:
+        return s
+    return s[:1200] + '\n...<truncated>...\n' + s[-(MAX_OUTPUT-1250):]
+
+
+def safe_rel(path):
+    p = pathlib.PurePosixPath(path)
+    if p.is_absolute() or '..' in p.parts:
+        raise ValueError('path must be relative and stay inside the project')
+    if SENSITIVE.search(path):
+        raise ValueError('refusing to read/write a sensitive-looking path')
+    return str(p)
+
+
+class Project:
+    def __init__(self, name, cfg, global_cfg):
+        self.name = name
+        self.cfg = cfg
+        self.transport = cfg.get('transport', 'local')
+        self.root = os.path.expanduser(cfg['root'])
+        self.host = cfg.get('ssh_host') or global_cfg.get('settings', {}).get('ssh_host', 'wsl')
+        self.build_cmd = cfg.get('build', 'auto')
+        self.backed_up = set()
+        self.backup_root = STATE/'backups'/name/dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+
+    def _remote(self, shell_cmd, timeout=900):
+        full = f"cd {shlex.quote(self.root)} && {shell_cmd}"
+        p = subprocess.run(['ssh', self.host, full], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+        return p.returncode, p.stdout
+
+    def exec(self, shell_cmd, timeout=900):
+        if self.transport == 'ssh':
+            return self._remote(shell_cmd, timeout)
+        return run_local(shell_cmd, cwd=self.root, timeout=timeout)
+
+    def exists(self):
+        if self.transport == 'ssh':
+            rc, _ = self._remote('pwd', 20)
+            return rc == 0
+        return pathlib.Path(self.root).is_dir()
+
+    def read_file(self, path, start=1, end=260):
+        path = safe_rel(path)
+        start = max(1, int(start)); end = max(start, min(int(end), start+399))
+        if self.transport == 'ssh':
+            py = (
+                "import pathlib; p=pathlib.Path(%r); lines=p.read_text(errors='replace').splitlines(); "
+                "a=%d; b=%d; print('\\n'.join(f'{i+1}: {lines[i]}' for i in range(a-1,min(b,len(lines)))))"
+            ) % (path, start, end)
+            rc, out = self._remote('python3 -c ' + shlex.quote(py), 60)
+        else:
+            p = pathlib.Path(self.root)/path
+            if not p.exists(): return 2, 'file not found'
+            lines = p.read_text(errors='replace').splitlines()
+            out = '\n'.join(f'{i+1}: {lines[i]}' for i in range(start-1, min(end, len(lines))))
+            rc = 0
+        return rc, clip(out)
+
+    def _raw_read(self, path):
+        path = safe_rel(path)
+        if self.transport == 'ssh':
+            code = "import pathlib,sys; sys.stdout.write(pathlib.Path(%r).read_text(errors='replace'))" % path
+            return self._remote('python3 -c ' + shlex.quote(code), 60)
+        p = pathlib.Path(self.root)/path
+        if not p.exists(): return 2, ''
+        return 0, p.read_text(errors='replace')
+
+    def _backup(self, path, original):
+        if path in self.backed_up: return
+        dest = self.backup_root/path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(original)
+        self.backed_up.add(path)
+
+    def write_file(self, path, content):
+        path = safe_rel(path)
+        rc, old = self._raw_read(path)
+        self._backup(path, old if rc == 0 else '')
+        if self.transport == 'ssh':
+            b64 = base64.b64encode(content.encode()).decode()
+            code = "import pathlib,base64; p=pathlib.Path(%r); p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(base64.b64decode(%r))" % (path, b64)
+            return self._remote('python3 -c ' + shlex.quote(code), 60)
+        p = pathlib.Path(self.root)/path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+        return 0, f'wrote {path} ({len(content)} chars)'
+
+    def replace_text(self, path, old, new, count=1):
+        path = safe_rel(path)
+        rc, text = self._raw_read(path)
+        if rc != 0: return rc, 'file not found'
+        n = text.count(old)
+        if n == 0: return 3, 'old text not found exactly'
+        if count and n < count: return 4, f'old text occurs only {n} time(s)'
+        self._backup(path, text)
+        updated = text.replace(old, new, count if count else -1)
+        return self.write_file(path, updated)
+
+    def search(self, pattern, glob=''):
+        args = ['rg', '-n', '--hidden', '--glob', '!build/**', '--glob', '!.git/**']
+        if glob: args += ['--glob', glob]
+        args += ['--', pattern, '.']
+        cmd = ' '.join(shlex.quote(x) for x in args)
+        rc, out = self.exec(cmd, 60)
+        return rc, clip(out)
+
+    def list_files(self, depth=3):
+        depth = max(1, min(int(depth), 6))
+        rc, out = self.exec(f"find . -maxdepth {depth} -type f -not -path './.git/*' -not -path './build/*' | sort | head -400", 60)
+        return rc, clip(out)
+
+    def safe_command(self, cmd):
+        c = cmd.strip()
+        if any(re.search(p, c, re.I) for p in BLOCKED):
+            return False, 'blocked destructive/network/admin command'
+        if not c.startswith(ALLOWED_PREFIX):
+            return False, 'command prefix not in Local Engineer allowlist'
+        return True, ''
+
+    def command(self, cmd, timeout=900):
+        ok, why = self.safe_command(cmd)
+        if not ok: return 126, why
+        return self.exec(cmd, timeout)
+
+    def build(self, extra=''):
+        cmd = self.build_cmd
+        if cmd == 'auto':
+            probe = "if [ -x ./ai-build ]; then echo './ai-build'; elif [ -f ./build_local.sh ]; then echo 'bash build_local.sh'; elif [ -f ./build-local.sh ]; then echo 'bash build-local.sh'; elif [ -f ./Cargo.toml ]; then echo 'cargo build'; elif [ -f ./Makefile ]; then echo 'make'; else exit 2; fi"
+            rc, out = self.exec(probe, 30)
+            if rc != 0: return rc, 'could not auto-detect build command'
+            cmd = out.strip().splitlines()[-1]
+        if extra:
+            cmd += ' ' + extra
+        return self.command(cmd, 1800)
+
+
+def get_json(url, payload=None, timeout=600):
+    data = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def ensure_bonsai():
+    try:
+        get_json(API_BASE + '/models', timeout=3)
+        return
+    except Exception:
+        pass
+    print('[local-engineer] Bonsai API not ready; switching to Bonsai mode...')
+    p = subprocess.run([str(HOME/'bin/llm'), 'bonsai'])
+    if p.returncode:
+        raise SystemExit('failed to start Bonsai')
+
+
+def model_id():
+    data = get_json(API_BASE + '/models', timeout=10)
+    return data['data'][0]['id']
+
+
+def tool_defs():
+    def f(name, desc, props, required):
+        return {'type':'function','function':{'name':name,'description':desc,'parameters':{'type':'object','properties':props,'required':required}}}
+    return [
+      f('git_status','Show repository status.',{},[]),
+      f('git_diff','Show current uncommitted diff.',{},[]),
+      f('list_files','List project files to a bounded depth.',{'depth':{'type':'integer','minimum':1,'maximum':6}},[]),
+      f('search_text','Search text with ripgrep.',{'pattern':{'type':'string'},'glob':{'type':'string'}},['pattern']),
+      f('read_file','Read a line range from a project file.',{'path':{'type':'string'},'start_line':{'type':'integer'},'end_line':{'type':'integer'}},['path']),
+      f('replace_text','Replace exact text in a file. Prefer this for targeted edits.',{'path':{'type':'string'},'old':{'type':'string'},'new':{'type':'string'},'count':{'type':'integer','minimum':1}},['path','old','new']),
+      f('write_file','Create or rewrite a project file. Use mainly for small/new files.',{'path':{'type':'string'},'content':{'type':'string'}},['path','content']),
+      f('run_command','Run an allowlisted read/build/test command in the project.',{'command':{'type':'string'},'timeout':{'type':'integer','minimum':1,'maximum':1800}},['command']),
+      f('build_project','Run the configured project build command.',{'extra_args':{'type':'string'}},[]),
+    ]
+
+
+def dispatch(project, name, args):
+    try:
+        if name == 'git_status': rc,out = project.exec('git status --short --branch',60)
+        elif name == 'git_diff': rc,out = project.exec('git diff -- .',60)
+        elif name == 'list_files': rc,out = project.list_files(args.get('depth',3))
+        elif name == 'search_text': rc,out = project.search(args['pattern'], args.get('glob',''))
+        elif name == 'read_file': rc,out = project.read_file(args['path'], args.get('start_line',1), args.get('end_line',260))
+        elif name == 'replace_text': rc,out = project.replace_text(args['path'], args['old'], args['new'], args.get('count',1))
+        elif name == 'write_file': rc,out = project.write_file(args['path'], args['content'])
+        elif name == 'run_command': rc,out = project.command(args['command'], args.get('timeout',900))
+        elif name == 'build_project': rc,out = project.build(args.get('extra_args',''))
+        else: return 'unknown tool'
+        return f'exit={rc}\n{clip(out)}'
+    except Exception as e:
+        return 'tool error: ' + repr(e)
+
+
+def agent(project, task):
+    ensure_bonsai()
+    mid = model_id()
+    system = f'''You are Local Engineer, an autonomous coding/build agent working on project {project.name!r}.
+Project root: {project.root}. Transport: {project.transport}.
+Goal: complete the user's task with minimal, reviewable changes and verify them.
+Rules:
+- Start by checking git status and inspecting relevant files. Respect pre-existing user changes; never erase unrelated work.
+- Never push, reset, clean, force checkout, sudo, modify OS services, or access secrets/credentials.
+- Prefer replace_text for small edits. Use write_file mainly for new/small files.
+- Do not edit generated build outputs.
+- Run the narrowest useful tests/build after edits. If it fails, inspect the error and iterate.
+- Keep tool output bounded; read only needed line ranges.
+- Do not commit. End with a concise report: files changed, verification run, remaining risks.
+'''
+    messages=[{'role':'system','content':system},{'role':'user','content':task}]
+    tools=tool_defs()
+    for round_no in range(1, MAX_ROUNDS+1):
+        payload={'model':mid,'messages':messages,'tools':tools,'tool_choice':'auto','temperature':0.2,'max_tokens':4096}
+        try:
+            resp=get_json(API_BASE+'/chat/completions',payload,timeout=900)
+        except urllib.error.HTTPError as e:
+            body=e.read().decode(errors='replace')
+            raise SystemExit(f'Bonsai API error {e.code}: {body[:1200]}')
+        msg=resp['choices'][0]['message']
+        calls=msg.get('tool_calls') or []
+        if not calls:
+            print(msg.get('content') or '[no final content]')
+            return 0
+        messages.append({'role':'assistant','content':msg.get('content'),'tool_calls':calls})
+        for call in calls:
+            fn=call['function']['name']
+            try: args=json.loads(call['function'].get('arguments') or '{}')
+            except Exception: args={}
+            print(f'[tool {round_no}] {fn}')
+            result=dispatch(project,fn,args)
+            messages.append({'role':'tool','tool_call_id':call['id'],'content':result})
+    print('[ERR] tool round limit reached')
+    return 2
+
+
+def discover(cfg):
+    host=os.environ.get('LOCAL_ENGINEER_SSH_HOST', cfg.get('settings',{}).get('ssh_host','wsl'))
+    roots=['/home/stc/zmk-dev','/home/stc/zmk-sim','/home/stc/rmk-dev']
+    expr=' '.join(shlex.quote(r) for r in roots)
+    cmd=f"for r in {expr}; do [ -d \"$r\" ] && find \"$r\" -maxdepth 6 -type d -name .git -print; done"
+    p=subprocess.run(['ssh',host,cmd],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=60)
+    if p.returncode:
+        print(p.stdout); return p.returncode
+    repos=[]
+    for line in p.stdout.splitlines():
+        if line.endswith('/.git'): repos.append(line[:-5])
+    for r in sorted(set(repos)):
+        print(r)
+    return 0
+
+
+def main():
+    ap=argparse.ArgumentParser(prog='local-engineer')
+    sub=ap.add_subparsers(dest='cmd',required=True)
+    sub.add_parser('status'); sub.add_parser('projects'); sub.add_parser('discover')
+    b=sub.add_parser('build'); b.add_argument('project'); b.add_argument('extra',nargs='*')
+    f=sub.add_parser('fix'); f.add_argument('project'); f.add_argument('task',nargs='+')
+    sub.add_parser('technocore-bonsai')
+    args=ap.parse_args()
+    cfg=load_cfg()
+    if args.cmd=='status':
+        subprocess.run([str(HOME/'bin/llm'),'status']); return
+    if args.cmd=='projects':
+        for k,v in cfg['projects'].items(): print(f"{k:20} {v.get('transport','local'):5} {v['root']}")
+        return
+    if args.cmd=='discover': raise SystemExit(discover(cfg))
+    pname='technocore' if args.cmd=='technocore-bonsai' else args.project
+    if pname not in cfg['projects']: raise SystemExit(f'unknown project: {pname}')
+    p=Project(pname,cfg['projects'][pname],cfg)
+    if not p.exists(): raise SystemExit(f'project not reachable: {p.root} ({p.transport})')
+    if args.cmd=='build':
+        rc,out=p.build(' '.join(args.extra)); print(out); raise SystemExit(rc)
+    if args.cmd=='technocore-bonsai':
+        task='''Inspect the current local Technocore implementation and add a managed_bonsai LLM backend alongside the existing managed_mlx backend. Preserve managed_mlx behavior. managed_bonsai must call the local OpenAI-compatible Bonsai API at http://127.0.0.1:8080/v1 and must not spawn mlx_worker.py. Backend selection must honor environment variable TECHNOCORE_LLM_BACKEND, with values managed_bonsai or managed_mlx, while preserving the current default when the variable is absent. Reuse existing prompt, timeout, logging, draft/review/quality-gate behavior. Add or update deterministic tests and concise documentation. Do not touch secrets, signing identity, launch daemon plist files, or network posting safety rules. Run the existing unit tests and any focused new tests. Do not commit.'''
+        raise SystemExit(agent(p,task))
+    raise SystemExit(agent(p,' '.join(args.task)))
+
+if __name__=='__main__': main()
