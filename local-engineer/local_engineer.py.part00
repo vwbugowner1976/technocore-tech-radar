@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+import argparse, base64, datetime as dt, json, os, pathlib, re, shlex, subprocess, sys, urllib.request, urllib.error
+
+HOME = pathlib.Path.home()
+CFG = pathlib.Path(os.environ.get('LOCAL_ENGINEER_CONFIG', HOME/'.config/local-engineer/projects.json'))
+STATE = HOME/'.local/state/local-engineer'
+API_BASE = os.environ.get('BONSAI_API_BASE', 'http://127.0.0.1:8080/v1')
+MAX_ROUNDS = 20
+MAX_OUTPUT = 6500
+
+BLOCKED = [
+    r'(^|[;&| ])sudo([ ;&|]|$)', r'\brm\s+-rf\b', r'\bgit\s+push\b', r'\bgit\s+reset\b',
+    r'\bgit\s+clean\b', r'\bgit\s+checkout\s+--\b', r'\bgit\s+restore\s+\.\b',
+    r'\bshutdown\b', r'\breboot\b', r'\bdiskutil\b', r'\bmkfs\b', r'\bdd\s+if=',
+    r'\blaunchctl\b', r'\bscp\b', r'\brsync\b', r'\bcurl\b', r'\bwget\b', r'>\s*/', r'\|\s*(ba)?sh\b'
+]
+ALLOWED_PREFIX = (
+    'git status', 'git diff', 'git log', 'git branch', 'git rev-parse', 'git show',
+    'ls', 'find', 'rg', 'grep', 'sed', 'head', 'tail', 'wc', 'pwd', 'stat',
+    'python ', 'python3 ', 'pytest', 'cargo ', 'west ', 'cmake ', 'ninja', 'ctest',
+    'make', 'bash ', './', '.venv/', 'sh '
+)
+SENSITIVE = re.compile(r'(^|/)(\.env($|\.)|.*(secret|token|private[_-]?key|sign[_-]?seed|credentials?).*)', re.I)
+
+
+def load_cfg():
+    if not CFG.exists():
+        raise SystemExit(f'Config not found: {CFG}\nRun local-engineer init first.')
+    return json.loads(CFG.read_text())
+
+
+def run_local(cmd, cwd=None, timeout=900):
+    p = subprocess.run(cmd, cwd=cwd, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+    return p.returncode, p.stdout
+
+
+def clip(s):
+    s = s or ''
+    if len(s) <= MAX_OUTPUT:
+        return s
+    return s[:1200] + '\n...<truncated>...\n' + s[-(MAX_OUTPUT-1250):]
+
+
+def safe_rel(path):
+    p = pathlib.PurePosixPath(path)
+    if p.is_absolute() or '..' in p.parts:
+        raise ValueError('path must be relative and stay inside the project')
+    if SENSITIVE.search(path):
+        raise ValueError('refusing to read/write a sensitive-looking path')
+    return str(p)
+
+
+class Project:
+    def __init__(self, name, cfg, global_cfg):
+        self.name = name
+        self.cfg = cfg
+        self.transport = cfg.get('transport', 'local')
+        self.root = os.path.expanduser(cfg['root'])
+        self.host = cfg.get('ssh_host') or global_cfg.get('settings', {}).get('ssh_host', 'wsl')
+        self.build_cmd = cfg.get('build', 'auto')
+        self.backed_up = set()
+        self.backup_root = STATE/'backups'/name/dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+
+    def _remote(self, shell_cmd, timeout=900):
+        full = f"cd {shlex.quote(self.root)} && {shell_cmd}"
+        p = subprocess.run(['ssh', self.host, full], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+        return p.returncode, p.stdout
+
+    def exec(self, shell_cmd, timeout=900):
+        if self.transport == 'ssh':
+            return self._remote(shell_cmd, timeout)
+        return run_local(shell_cmd, cwd=self.root, timeout=timeout)
+
+    def exists(self):
+        if self.transport == 'ssh':
+            rc, _ = self._remote('pwd', 20)
+            return rc == 0
+        return pathlib.Path(self.root).is_dir()
+
+    def read_file(self, path, start=1, end=260):
+        path = safe_rel(path)
+        start = max(1, int(start)); end = max(start, min(int(end), start+399))
+        if self.transport == 'ssh':
+            py = (
+                "import pathlib; p=pathlib.Path(%r); lines=p.read_text(errors='replace').splitlines(); "
+                "a=%d; b=%d; print('\\n'.join(f'{i+1}: {lines[i]}' for i in range(a-1,min(b,len(lines)))))"
+            ) % (path, start, end)
+            rc, out = self._remote('python3 -c ' + shlex.quote(py), 60)
+        else:
+            p = pathlib.Path(self.root)/path
+            if not p.exists(): return 2, 'file not found'
+            lines = p.read_text(errors='replace').splitlines()
+            out = '\n'.join(f'{i+1}: {lines[i]}' for i in range(start-1, min(end, len(lines))))
+            rc = 0
+        return rc, clip(out)
+
+    def _raw_read(self, path):
+        path = safe_rel(path)
+        if self.transport == 'ssh':
+            code = "import pathlib,sys; sys.stdout.write(pathlib.Path(%r).read_text(errors='replace'))" % path
+            return self._remote('python3 -c ' + shlex.quote(code), 60)
+        p = pathlib.Path(self.root)/path
+        if not p.exists(): return 2, ''
+        return 0, p.read_text(errors='replace')
+
+    def _backup(self, path, original):
+        if path in self.backed_up: return
+        dest = self.backup_root/path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(original)
+        self.backed_up.add(path)
+
+    def write_file(self, path, content):
+        path = safe_rel(path)
+        rc, old = self._raw_read(path)
+        self._backup(path, old if rc == 0 else '')
+        if self.transport == 'ssh':
+            b64 = base64.b64encode(content.encode()).decode()
+            code = "import pathlib,base64; p=pathlib.Path(%r); p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(base64.b64decode(%r))" % (path, b64)
+            return self._remote('python3 -c ' + shlex.quote(code), 60)
