@@ -10,6 +10,8 @@ MAX_OUTPUT = 2500
 KEEP_TOOL_ROUNDS = 2
 MAX_WORKING_MEMORY = 3200
 MAX_REPEAT_CALLS = 2
+DISCOVERY_ROUNDS = 6
+FORCE_ACTION_ROUND = 10
 
 BLOCKED = [
     r'(^|[;&| ])sudo([ ;&|]|$)', r'\brm\b', r'\bmv\b', r'\bgit\s+push\b', r'\bgit\s+reset\b',
@@ -200,20 +202,22 @@ def model_id():
     return data['data'][0]['id']
 
 
-def tool_defs():
+def tool_defs(phase='discovery'):
     def f(name, desc, props, required):
         return {'type':'function','function':{'name':name,'description':desc,'parameters':{'type':'object','properties':props,'required':required}}}
-    return [
+    common = [
       f('git_status','Show repository status.',{},[]),
       f('git_diff','Show current uncommitted diff.',{},[]),
-      f('list_files','List project files to a bounded depth.',{'depth':{'type':'integer','minimum':1,'maximum':6}},[]),
-      f('search_text','Search text with ripgrep.',{'pattern':{'type':'string'},'glob':{'type':'string'}},['pattern']),
       f('read_file','Read a line range from a project file.',{'path':{'type':'string'},'start_line':{'type':'integer'},'end_line':{'type':'integer'}},['path']),
       f('replace_text','Replace exact text in a file. Prefer this for targeted edits.',{'path':{'type':'string'},'old':{'type':'string'},'new':{'type':'string'},'count':{'type':'integer','minimum':1}},['path','old','new']),
       f('write_file','Create or rewrite a project file. Use mainly for small/new files.',{'path':{'type':'string'},'content':{'type':'string'}},['path','content']),
-      f('run_command','Run an allowlisted read/build/test command in the project.',{'command':{'type':'string'},'timeout':{'type':'integer','minimum':1,'maximum':1800}},['command']),
+      f('run_command','Run an allowlisted build/test or narrowly targeted inspection command in the project.',{'command':{'type':'string'},'timeout':{'type':'integer','minimum':1,'maximum':1800}},['command']),
       f('build_project','Run the configured project build command.',{'extra_args':{'type':'string'}},[]),
     ]
+    if phase == 'discovery':
+        common.insert(2, f('list_files','List project files to a bounded depth.',{'depth':{'type':'integer','minimum':1,'maximum':6}},[]))
+        common.insert(3, f('search_text','Search text with ripgrep.',{'pattern':{'type':'string'},'glob':{'type':'string'}},['pattern']))
+    return common
 
 
 def dispatch(project, name, args):
@@ -245,13 +249,14 @@ Rules:
 - Prefer replace_text for small edits. Use write_file mainly for new/small files.
 - Do not edit generated build outputs.
 - Run the narrowest useful tests/build after edits. If it fails, inspect the error and iterate.
-- Keep tool output bounded; read only needed line ranges. Older tool rounds may be dropped, but a compact working memory is provided. Do not repeat identical searches/commands; use the memory, change the query, or proceed.
+- Keep tool output bounded; read only needed line ranges. Older tool rounds may be dropped, but a compact working memory is provided. Discovery is time-boxed: once broad search tools disappear, proceed with a targeted edit or report a concrete blocker. Do not invent more searches to avoid acting.
 - Do not commit. End with a concise report: files changed, verification run, remaining risks.
 '''
     tool_rounds=[]
-    tools=tool_defs()
     working_memory=[]
     seen_calls={}
+    edit_count=0
+    verify_count=0
 
     def remember_tool(fn, args, result):
         arg_text=json.dumps(args, ensure_ascii=False, sort_keys=True)
@@ -265,8 +270,37 @@ Rules:
             joined='\n'.join(working_memory)
 
     for round_no in range(1, MAX_ROUNDS+1):
+        if edit_count:
+            phase='verify'
+        elif round_no <= DISCOVERY_ROUNDS:
+            phase='discovery'
+        else:
+            phase='action'
+        tools=tool_defs('discovery' if phase == 'discovery' else 'action')
+
         memory_text='\n'.join(working_memory)
         user_content=task
+        if phase == 'discovery':
+            user_content += (
+                f'\n\nPHASE: DISCOVERY ({round_no}/{DISCOVERY_ROUNDS}). '
+                'Identify the exact implementation files/functions quickly. Do not keep broad-searching once the edit point is known.'
+            )
+        elif phase == 'action':
+            user_content += (
+                '\n\nPHASE: IMPLEMENTATION REQUIRED. Broad list/search tools are intentionally unavailable. '
+                'Use the evidence already collected plus targeted read_file. Make the smallest safe edit now. '
+                'If a concrete blocker prevents editing, stop and state that blocker instead of doing more exploration.'
+            )
+            if round_no >= FORCE_ACTION_ROUND:
+                user_content += (
+                    '\nYou have spent enough rounds investigating. Do not use run_command for rg/grep/find/ls/sed/head/tail. '
+                    'Either edit with replace_text/write_file, or finish with a precise blocker.'
+                )
+        else:
+            user_content += (
+                '\n\nPHASE: VERIFY. Edits already exist. Inspect the diff, run focused tests/build, and fix only failures caused by the change. '
+                'Do not restart broad architecture discovery.'
+            )
         if memory_text:
             user_content += (
                 '\n\nCompact working memory from earlier tool rounds '
@@ -300,8 +334,19 @@ Rules:
                     'were already executed twice. Use the compact working memory/current context, '
                     'change the query/line range/command, or proceed to an edit/test.'
                 )
+            elif phase == 'action' and round_no >= FORCE_ACTION_ROUND and fn == 'run_command' and re.match(
+                r'^\\s*(rg|grep|find|ls|sed|head|tail|wc)\\b', args.get('command','')
+            ):
+                result=(
+                    'Exploratory shell command suppressed in forced-action phase. '
+                    'Use targeted read_file, make the edit now, or finish with a concrete blocker.'
+                )
             else:
                 result=dispatch(project,fn,args)
+            if fn in ('replace_text','write_file') and result.startswith('exit=0'):
+                edit_count += 1
+            if edit_count and fn in ('git_diff','build_project','run_command'):
+                verify_count += 1
             remember_tool(fn,args,result)
             bundle.append({'role':'tool','tool_call_id':call['id'],'content':result})
         tool_rounds.append(bundle)
