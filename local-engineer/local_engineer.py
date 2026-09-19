@@ -205,15 +205,18 @@ def model_id():
 def tool_defs(phase='discovery'):
     def f(name, desc, props, required):
         return {'type':'function','function':{'name':name,'description':desc,'parameters':{'type':'object','properties':props,'required':required}}}
-    common = [
+    edit_verify = [
       f('git_status','Show repository status.',{},[]),
       f('git_diff','Show current uncommitted diff.',{},[]),
-      f('read_file','Read a line range from a project file.',{'path':{'type':'string'},'start_line':{'type':'integer'},'end_line':{'type':'integer'}},['path']),
       f('replace_text','Replace exact text in a file. Prefer this for targeted edits.',{'path':{'type':'string'},'old':{'type':'string'},'new':{'type':'string'},'count':{'type':'integer','minimum':1}},['path','old','new']),
       f('write_file','Create or rewrite a project file. Use mainly for small/new files.',{'path':{'type':'string'},'content':{'type':'string'}},['path','content']),
       f('run_command','Run an allowlisted build/test or narrowly targeted inspection command in the project.',{'command':{'type':'string'},'timeout':{'type':'integer','minimum':1,'maximum':1800}},['command']),
       f('build_project','Run the configured project build command.',{'extra_args':{'type':'string'}},[]),
     ]
+    if phase == 'force_action':
+        return edit_verify
+    common = list(edit_verify)
+    common.insert(2, f('read_file','Read a line range from a project file.',{'path':{'type':'string'},'start_line':{'type':'integer'},'end_line':{'type':'integer'}},['path']))
     if phase == 'discovery':
         common.insert(2, f('list_files','List project files to a bounded depth.',{'depth':{'type':'integer','minimum':1,'maximum':6}},[]))
         common.insert(3, f('search_text','Search text with ripgrep.',{'pattern':{'type':'string'},'glob':{'type':'string'}},['pattern']))
@@ -272,11 +275,13 @@ Rules:
     for round_no in range(1, MAX_ROUNDS+1):
         if edit_count:
             phase='verify'
+        elif round_no >= FORCE_ACTION_ROUND:
+            phase='force_action'
         elif round_no <= DISCOVERY_ROUNDS:
             phase='discovery'
         else:
             phase='action'
-        tools=tool_defs('discovery' if phase == 'discovery' else 'action')
+        tools=tool_defs(phase)
 
         memory_text='\n'.join(working_memory)
         user_content=task
@@ -288,14 +293,16 @@ Rules:
         elif phase == 'action':
             user_content += (
                 '\n\nPHASE: IMPLEMENTATION REQUIRED. Broad list/search tools are intentionally unavailable. '
-                'Use the evidence already collected plus targeted read_file. Make the smallest safe edit now. '
+                'Use the evidence already collected plus at most a few targeted read_file calls. Make the smallest safe edit now. '
                 'If a concrete blocker prevents editing, stop and state that blocker instead of doing more exploration.'
             )
-            if round_no >= FORCE_ACTION_ROUND:
-                user_content += (
-                    '\nYou have spent enough rounds investigating. Do not use run_command for rg/grep/find/ls/sed/head/tail. '
-                    'Either edit with replace_text/write_file, or finish with a precise blocker.'
-                )
+        elif phase == 'force_action':
+            user_content += (
+                '\n\nPHASE: FORCED ACTION. Investigation is over. read_file, list_files, and search_text are intentionally unavailable. '
+                'Use compact working memory and the latest context to edit with replace_text/write_file, inspect git diff, and test/build. '
+                'Do not use run_command for rg/grep/find/ls/sed/head/tail/wc. If you truly cannot edit safely with the evidence already gathered, '
+                'finish now with one precise blocker and the exact missing fact needed.'
+            )
         else:
             user_content += (
                 '\n\nPHASE: VERIFY. Edits already exist. Inspect the diff, run focused tests/build, and fix only failures caused by the change. '
@@ -334,7 +341,7 @@ Rules:
                     'were already executed twice. Use the compact working memory/current context, '
                     'change the query/line range/command, or proceed to an edit/test.'
                 )
-            elif phase == 'action' and round_no >= FORCE_ACTION_ROUND and fn == 'run_command' and re.match(
+            elif phase == 'force_action' and fn == 'run_command' and re.match(
                 r'^\\s*(rg|grep|find|ls|sed|head|tail|wc)\\b', args.get('command','')
             ):
                 result=(
