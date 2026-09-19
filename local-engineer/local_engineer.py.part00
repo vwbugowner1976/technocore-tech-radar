@@ -9,10 +9,11 @@ MAX_ROUNDS = 20
 MAX_OUTPUT = 6500
 
 BLOCKED = [
-    r'(^|[;&| ])sudo([ ;&|]|$)', r'\brm\s+-rf\b', r'\bgit\s+push\b', r'\bgit\s+reset\b',
+    r'(^|[;&| ])sudo([ ;&|]|$)', r'\brm\b', r'\bmv\b', r'\bgit\s+push\b', r'\bgit\s+reset\b',
     r'\bgit\s+clean\b', r'\bgit\s+checkout\s+--\b', r'\bgit\s+restore\s+\.\b',
     r'\bshutdown\b', r'\breboot\b', r'\bdiskutil\b', r'\bmkfs\b', r'\bdd\s+if=',
-    r'\blaunchctl\b', r'\bscp\b', r'\brsync\b', r'\bcurl\b', r'\bwget\b', r'>\s*/', r'\|\s*(ba)?sh\b'
+    r'\blaunchctl\b', r'\bscp\b', r'\brsync\b', r'\bcurl\b', r'\bwget\b',
+    r'[;&<>\x60\n]', r'&&', r'\|\|', r'\$\('
 ]
 ALLOWED_PREFIX = (
     'git status', 'git diff', 'git log', 'git branch', 'git rev-parse', 'git show',
