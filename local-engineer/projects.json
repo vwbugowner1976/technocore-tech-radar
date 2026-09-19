@@ -1,0 +1,22 @@
+{
+  "settings": {
+    "ssh_host": "wsl"
+  },
+  "projects": {
+    "technocore": {
+      "transport": "local",
+      "root": "/Users/macmini/technocore-tech-radar",
+      "build": ".venv/bin/python -m unittest discover -v"
+    },
+    "prospector": {
+      "transport": "ssh",
+      "root": "/home/stc/zmk-sim/v0.4/projects/prospector-bridge",
+      "build": "bash build_local.sh"
+    },
+    "rmk-pg1kb": {
+      "transport": "ssh",
+      "root": "/home/stc/rmk-dev/rmk-pg1kb-proto-ph3",
+      "build": "./ai-build"
+    }
+  }
+}
