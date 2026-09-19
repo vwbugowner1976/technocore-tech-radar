@@ -243,7 +243,7 @@ Rules:
 - Prefer replace_text for small edits. Use write_file mainly for new/small files.
 - Do not edit generated build outputs.
 - Run the narrowest useful tests/build after edits. If it fails, inspect the error and iterate.
-- Keep tool output bounded; read only needed line ranges.
+- Keep tool output bounded; read only needed line ranges. Older tool rounds may be dropped from context; re-check facts with tools when needed.
 - Do not commit. End with a concise report: files changed, verification run, remaining risks.
 '''
     base_messages=[{'role':'system','content':system},{'role':'user','content':task}]
@@ -251,11 +251,6 @@ Rules:
     tools=tool_defs()
     for round_no in range(1, MAX_ROUNDS+1):
         messages=list(base_messages)
-        if len(tool_rounds) > KEEP_TOOL_ROUNDS:
-            messages.append({
-                'role':'system',
-                'content':'Earlier tool rounds were intentionally dropped to stay within the 8K context window. Re-check any fact you still need with tools; do not assume dropped output.'
-            })
         for bundle in tool_rounds[-KEEP_TOOL_ROUNDS:]:
             messages.extend(bundle)
         payload={'model':mid,'messages':messages,'tools':tools,'tool_choice':'auto','temperature':0.2,'max_tokens':2048}
